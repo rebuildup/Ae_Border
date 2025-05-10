@@ -20,13 +20,13 @@
 /*******************************************************************/
 
 /*
-	Border.h
+    Border.h
 */
 
 #pragma once
 
-#ifndef SKELETON_H
-#define SKELETON_H
+#ifndef BORDER_H
+#define BORDER_H
 
 typedef unsigned char		u_char;
 typedef unsigned short		u_short;
@@ -37,13 +37,13 @@ typedef short int			int16;
 #define PF_TABLE_SZ_16	4096
 
 #define PF_DEEP_COLOR_AWARE 1	// make sure we get 16bpc pixels; 
-								// AE_Effect.h checks for this.
+// AE_Effect.h checks for this.
 
 #include "AEConfig.h"
 
 #ifdef AE_OS_WIN
-	typedef unsigned short PixelType;
-	#include <Windows.h>
+typedef unsigned short PixelType;
+#include <Windows.h>
 #endif
 
 #include "entry.h"
@@ -61,48 +61,61 @@ typedef short int			int16;
 
 /* Versioning information */
 
-#define	MAJOR_VERSION	1
-#define	MINOR_VERSION	1
-#define	BUG_VERSION		0
-#define	STAGE_VERSION	PF_Stage_DEVELOP
-#define	BUILD_VERSION	1
-
+#define MAJOR_VERSION    1
+#define MINOR_VERSION    0
+#define BUG_VERSION      0
+#define STAGE_VERSION    PF_Stage_DEVELOP
+#define BUILD_VERSION    1
 
 /* Parameter defaults */
 
-#define	SKELETON_GAIN_MIN		0
-#define	SKELETON_GAIN_MAX		100
-#define	SKELETON_GAIN_DFLT		10
+#define BORDER_THICKNESS_MIN     0
+#define BORDER_THICKNESS_MAX     100
+#define BORDER_THICKNESS_DFLT    3
+
+#define BORDER_THRESHOLD_MIN     0
+#define BORDER_THRESHOLD_MAX     255
+#define BORDER_THRESHOLD_DFLT    10
+
+// Conversion macros for 8/16 bit color
+#define PF_BYTE_TO_CHAR(b)      ((b) * PF_MAX_CHAN16 / PF_MAX_CHAN8)
+#define PF_CHAR_TO_BYTE(c)      ((c) * PF_MAX_CHAN8 / PF_MAX_CHAN16)
 
 enum {
-	SKELETON_INPUT = 0,
-	SKELETON_GAIN,
-	SKELETON_COLOR,
-	SKELETON_NUM_PARAMS
+    BORDER_INPUT = 0,
+    BORDER_THICKNESS,
+    BORDER_COLOR,
+    BORDER_THRESHOLD,
+    BORDER_SHOW_LINE_ONLY,
+    BORDER_NUM_PARAMS
 };
 
 enum {
-	GAIN_DISK_ID = 1,
-	COLOR_DISK_ID,
+    THICKNESS_DISK_ID = 1,
+    COLOR_DISK_ID,
+    THRESHOLD_DISK_ID,
+    SHOW_LINE_ONLY_DISK_ID
 };
 
-typedef struct GainInfo{
-	PF_FpLong	gainF;
-} GainInfo, *GainInfoP, **GainInfoH;
-
+typedef struct BorderInfo {
+    PF_FpLong   thicknessF;
+    PF_Pixel    color;
+    A_u_char    threshold;
+    PF_Boolean  showLineOnly;
+} BorderInfo, * BorderInfoP, ** BorderInfoH;
 
 extern "C" {
 
-	DllExport
-	PF_Err
-	EffectMain(
-		PF_Cmd			cmd,
-		PF_InData		*in_data,
-		PF_OutData		*out_data,
-		PF_ParamDef		*params[],
-		PF_LayerDef		*output,
-		void			*extra);
+    DllExport
+        PF_Err
+        EffectMain(
+            PF_Cmd			cmd,
+            PF_InData* in_data,
+            PF_OutData* out_data,
+            PF_ParamDef* params[],
+            PF_LayerDef* output,
+            void* extra);
 
 }
 
-#endif // SKELETON_H
+#endif // BORDER_H

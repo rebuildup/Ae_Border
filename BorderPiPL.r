@@ -17,7 +17,7 @@ resource 'PiPL' (16000) {
 		},
 		/* [3] */
 		Category {
-			"Sample Plug-ins"
+			"361do_plug"
 		},
 #ifdef AE_OS_WIN
 	#ifdef AE_PROC_INTELx64
@@ -41,7 +41,7 @@ resource 'PiPL' (16000) {
 		},
 		/* [8] */
 		AE_Effect_Version {
-			557057	/* 1.1 */
+			0x00080001
 		},
 		/* [9] */
 		AE_Effect_Info_Flags {
@@ -49,11 +49,11 @@ resource 'PiPL' (16000) {
 		},
 		/* [10] */
 		AE_Effect_Global_OutFlags {
-		0x02000000 //50332160
+		0x06000400
 
 		},
 		AE_Effect_Global_OutFlags_2 {
-		0x00000000
+		0x08000000
 		},
 		/* [11] */
 		AE_Effect_Match_Name {

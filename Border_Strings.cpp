@@ -28,12 +28,14 @@ typedef struct {
 
 
 
-TableString		g_strs[StrID_NUMTYPES] = {
-	StrID_NONE,						"",
-	StrID_Name,						"Border",
-	StrID_Description,				"An empty (skeletal, if you will) effect sample,\r for your modifying pleasure.\rCopyright 2007-2023 Adobe Inc.",
-	StrID_Gain_Param_Name,			"Gain",
-	StrID_Color_Param_Name,			"Color",
+TableString g_strs[StrID_NUMTYPES] = {
+    StrID_NONE,                      "",
+    StrID_Name,                      "Border",
+    StrID_Description,               "Generates a line between transparent and non-transparent pixels.\rCopyright 2023-2025.",
+    StrID_Thickness_Param_Name,      "Thickness",
+    StrID_Color_Param_Name,          "Color",
+    StrID_Threshold_Param_Name,      "Threshold",
+    StrID_ShowLineOnly_Param_Name,   "Show Line Only",
 };
 
 
