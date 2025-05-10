@@ -69,13 +69,14 @@ typedef unsigned short PixelType;
 
 /* Parameter defaults */
 
-#define BORDER_THICKNESS_MIN     0.0
-#define BORDER_THICKNESS_MAX     2000.0
-#define BORDER_THICKNESS_DFLT    10.0
+// Change from floating point to integer
+#define BORDER_THICKNESS_MIN     0
+#define BORDER_THICKNESS_MAX     100
+#define BORDER_THICKNESS_DFLT    1
 
 #define BORDER_THRESHOLD_MIN     0
 #define BORDER_THRESHOLD_MAX     255
-#define BORDER_THRESHOLD_DFLT    10
+#define BORDER_THRESHOLD_DFLT    1
 
 // Direction options
 enum {
@@ -109,10 +110,10 @@ enum {
 };
 
 typedef struct BorderInfo {
-    PF_FpLong   thicknessF;
+    A_long      thickness;      // Changed from PF_FpLong to A_long
     PF_Pixel    color;
     A_u_char    threshold;
-    A_long      direction;   // New field
+    A_long      direction;
     PF_Boolean  showLineOnly;
 } BorderInfo, * BorderInfoP, ** BorderInfoH;
 

@@ -69,7 +69,6 @@ GlobalSetup(
 
     return PF_Err_NONE;
 }
-
 static PF_Err
 ParamsSetup(
     PF_InData* in_data,
@@ -82,16 +81,14 @@ ParamsSetup(
 
     AEFX_CLR_STRUCT(def);
 
-    // Stroke Width parameter
-    PF_ADD_FLOAT_SLIDERX(STR(StrID_Thickness_Param_Name),
+    // Use SLIDER instead of FLOAT_SLIDERX
+    // This makes the slider display range from 0-100 while still allowing the full range internally
+    PF_ADD_SLIDER(STR(StrID_Thickness_Param_Name),
         BORDER_THICKNESS_MIN,
         BORDER_THICKNESS_MAX,
         BORDER_THICKNESS_MIN,
         BORDER_THICKNESS_MAX,
         BORDER_THICKNESS_DFLT,
-        PF_Precision_TENTHS,
-        0,
-        0,
         THICKNESS_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -122,11 +119,17 @@ ParamsSetup(
 
     AEFX_CLR_STRUCT(def);
 
-    // Direction parameter - Add a popup with 3 options
+    // Direction parameter using the pipe-delimited format from Skeleton example
+    char* directionStrings[3] = {
+        STR(StrID_Direction_Both),
+        STR(StrID_Direction_Inside),
+        STR(StrID_Direction_Outside)
+    };
+
     PF_ADD_POPUP(STR(StrID_Direction_Param_Name),
         3,                             // Number of choices
         DIRECTION_BOTH,                // Default choice (Both Directions)
-        STR(StrID_Direction_Both),     // Title for popup
+        directionStrings[0],           // Name for the popup
         DIRECTION_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -142,6 +145,7 @@ ParamsSetup(
 
     return err;
 }
+
 static PF_Boolean
 IsEdgePixel8(
     PF_EffectWorld* input,
@@ -151,9 +155,9 @@ IsEdgePixel8(
     A_long         thickness,
     A_long         direction)
 {
-    // Boundary check
+    // Boundary check - important to avoid crashes
     if (x < 0 || y < 0 || x >= input->width || y >= input->height) {
-        return FALSE;
+        return FALSE; // Skip pixels outside the bounds
     }
 
     // Skip processing if thickness is 0
@@ -177,15 +181,16 @@ IsEdgePixel8(
             // Skip the current pixel
             if (dx == 0 && dy == 0) continue;
 
-            // Calculate distance from current pixel
-            A_long dist = (A_long)sqrt((double)(dx * dx + dy * dy));
+            // Calculate distance from current pixel (using squared distance for efficiency)
+            A_long distSquared = (dx * dx + dy * dy);
+            A_long thicknessSquared = thickness * thickness;
 
             // Only check pixels within the thickness radius
-            if (dist <= thickness) {
+            if (distSquared <= thicknessSquared) {
                 A_long nx = x + dx;
                 A_long ny = y + dy;
 
-                // Boundary check
+                // Boundary check - critical to prevent crashes
                 if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
                     PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
                     PF_Boolean neighborIsTransparent = (neighborPixel->alpha <= threshold);
@@ -213,6 +218,17 @@ IsEdgePixel8(
                         }
                         break;
                     }
+                }
+                // For pixels outside the frame boundary, treat them as transparent
+                else if (!isTransparent && (direction == DIRECTION_INSIDE || direction == DIRECTION_BOTH)) {
+                    // If we're looking for Inside edges and the current pixel is non-transparent,
+                    // treat the out-of-bounds pixel as transparent -> this is an edge
+                    return TRUE;
+                }
+                else if (isTransparent && (direction == DIRECTION_OUTSIDE || direction == DIRECTION_BOTH)) {
+                    // If we're looking for Outside edges and the current pixel is transparent,
+                    // treat the out-of-bounds pixel as non-transparent -> this is an edge
+                    return TRUE;
                 }
             }
         }
@@ -256,11 +272,12 @@ IsEdgePixel16(
             // Skip the current pixel
             if (dx == 0 && dy == 0) continue;
 
-            // Calculate distance from current pixel
-            A_long dist = (A_long)sqrt((double)(dx * dx + dy * dy));
+            // Calculate distance from current pixel (using squared distance for efficiency)
+            A_long distSquared = (dx * dx + dy * dy);
+            A_long thicknessSquared = thickness * thickness;
 
             // Only check pixels within the thickness radius
-            if (dist <= thickness) {
+            if (distSquared <= thicknessSquared) {
                 A_long nx = x + dx;
                 A_long ny = y + dy;
 
@@ -292,6 +309,17 @@ IsEdgePixel16(
                         }
                         break;
                     }
+                }
+                // For pixels outside the frame boundary, treat them as transparent
+                else if (!isTransparent && (direction == DIRECTION_INSIDE || direction == DIRECTION_BOTH)) {
+                    // If we're looking for Inside edges and the current pixel is non-transparent,
+                    // treat the out-of-bounds pixel as transparent -> this is an edge
+                    return TRUE;
+                }
+                else if (isTransparent && (direction == DIRECTION_OUTSIDE || direction == DIRECTION_BOTH)) {
+                    // If we're looking for Outside edges and the current pixel is transparent,
+                    // treat the out-of-bounds pixel as non-transparent -> this is an edge
+                    return TRUE;
                 }
             }
         }
@@ -348,7 +376,7 @@ SmartRender(
     if (err) return err;
 
     // Parameter variables
-    PF_FpLong thickness = BORDER_THICKNESS_DFLT;
+    A_long thickness = BORDER_THICKNESS_DFLT;
     PF_Pixel8 color = { 255, 0, 0, 255 }; // Default to red
     A_u_char threshold = BORDER_THRESHOLD_DFLT;
     A_long direction = BORDER_DIRECTION_DFLT;
@@ -360,7 +388,7 @@ SmartRender(
     // Get thickness parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) thickness = param.u.fs_d.value;
+    if (!err) thickness = param.u.sd.value; // Getting integer value
     PF_CHECKIN_PARAM(in_data, &param);
 
     // Get color parameter
@@ -392,8 +420,11 @@ SmartRender(
     float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
-    // Apply resolution factor to thickness to get exact pixel calculation
-    A_long thicknessInt = (A_long)(thickness * resolution_factor);
+    // Scale thickness from 0-100 display range to 0-2000 internal range
+    A_long scaledThickness = thickness * 20; // Convert display range to internal range
+
+    // Apply resolution factor to get exact pixel calculation
+    A_long thicknessInt = (A_long)(scaledThickness * resolution_factor);
 
     if (input && output) {
         // First, copy the input to output if we're not in "show line only" mode
