@@ -62,20 +62,29 @@ typedef unsigned short PixelType;
 /* Versioning information */
 
 #define MAJOR_VERSION    1
-#define MINOR_VERSION    0
+#define MINOR_VERSION    1
 #define BUG_VERSION      0
 #define STAGE_VERSION    PF_Stage_DEVELOP
 #define BUILD_VERSION    1
 
 /* Parameter defaults */
 
-#define BORDER_THICKNESS_MIN     0
-#define BORDER_THICKNESS_MAX     100
-#define BORDER_THICKNESS_DFLT    3
+#define BORDER_THICKNESS_MIN     0.0
+#define BORDER_THICKNESS_MAX     2000.0
+#define BORDER_THICKNESS_DFLT    10.0
 
 #define BORDER_THRESHOLD_MIN     0
 #define BORDER_THRESHOLD_MAX     255
 #define BORDER_THRESHOLD_DFLT    10
+
+// Direction options
+enum {
+    DIRECTION_BOTH = 1,     // Default
+    DIRECTION_INSIDE,       // 2
+    DIRECTION_OUTSIDE       // 3
+};
+
+#define BORDER_DIRECTION_DFLT    DIRECTION_BOTH
 
 // Conversion macros for 8/16 bit color
 #define PF_BYTE_TO_CHAR(b)      ((b) * PF_MAX_CHAN16 / PF_MAX_CHAN8)
@@ -86,6 +95,7 @@ enum {
     BORDER_THICKNESS,
     BORDER_COLOR,
     BORDER_THRESHOLD,
+    BORDER_DIRECTION,        // New parameter
     BORDER_SHOW_LINE_ONLY,
     BORDER_NUM_PARAMS
 };
@@ -94,6 +104,7 @@ enum {
     THICKNESS_DISK_ID = 1,
     COLOR_DISK_ID,
     THRESHOLD_DISK_ID,
+    DIRECTION_DISK_ID,      // New disk ID
     SHOW_LINE_ONLY_DISK_ID
 };
 
@@ -101,6 +112,7 @@ typedef struct BorderInfo {
     PF_FpLong   thicknessF;
     PF_Pixel    color;
     A_u_char    threshold;
+    A_long      direction;   // New field
     PF_Boolean  showLineOnly;
 } BorderInfo, * BorderInfoP, ** BorderInfoH;
 
