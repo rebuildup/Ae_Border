@@ -64,12 +64,12 @@ GlobalSetup(
         STAGE_VERSION,
         BUILD_VERSION);
 
+    // Enable critical flags for proper rendering
     out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
     out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
     return PF_Err_NONE;
 }
-
 static PF_Err
 ParamsSetup(
     PF_InData* in_data,
@@ -142,7 +142,6 @@ ParamsSetup(
 
     return err;
 }
-
 static PF_Boolean
 IsEdgePixel8(
     PF_EffectWorld* input,
@@ -165,18 +164,28 @@ IsEdgePixel8(
 
     // For pixels outside the input buffer, we need custom handling
     PF_Boolean isTransparent = TRUE; // Default for out-of-bounds pixels
+    PF_Boolean isValidPosition = FALSE;
 
     // Check if we're inside the input buffer
     if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
+        isValidPosition = TRUE;
         // Get current pixel's alpha value
         PF_Pixel8* currentPixel = (PF_Pixel8*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel8));
         isTransparent = (currentPixel->alpha <= threshold);
     }
 
-    // Early return based on direction and current pixel transparency
-    if ((direction == DIRECTION_INSIDE && isTransparent) ||
-        (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+    // If we're outside the layer and want "inside" direction only, return early
+    if (!isValidPosition && direction == DIRECTION_INSIDE) {
         return FALSE;
+    }
+
+    // If we're inside the layer, check direction
+    if (isValidPosition) {
+        // Early return based on direction and current pixel transparency
+        if ((direction == DIRECTION_INSIDE && isTransparent) ||
+            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+            return FALSE;
+        }
     }
 
     // Track the shortest distance to a transparency transition
@@ -203,11 +212,18 @@ IsEdgePixel8(
 
             // Determine neighbor transparency
             PF_Boolean neighborIsTransparent = TRUE; // Default for out-of-bounds
+            PF_Boolean neighborIsValid = FALSE;
 
             if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                neighborIsValid = TRUE;
                 // Pixel is in bounds, get its actual value
                 PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
                 neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
+
+            // If both current position and neighbor are outside layer, skip
+            if (!isValidPosition && !neighborIsValid) {
+                continue;
             }
 
             // Check if this is an edge based on direction
@@ -238,7 +254,6 @@ IsEdgePixel8(
     // If we found an edge and it's within the thickness, this is an edge pixel
     return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
 }
-
 static PF_Boolean
 IsEdgePixel16(
     PF_EffectWorld* input,
@@ -261,18 +276,28 @@ IsEdgePixel16(
 
     // For pixels outside the input buffer, we need custom handling
     PF_Boolean isTransparent = TRUE; // Default for out-of-bounds pixels
+    PF_Boolean isValidPosition = FALSE;
 
     // Check if we're inside the input buffer
     if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
+        isValidPosition = TRUE;
         // Get current pixel's alpha value
         PF_Pixel16* currentPixel = (PF_Pixel16*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel16));
         isTransparent = (currentPixel->alpha <= threshold);
     }
 
-    // Early return based on direction and current pixel transparency
-    if ((direction == DIRECTION_INSIDE && isTransparent) ||
-        (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+    // If we're outside the layer and want "inside" direction only, return early
+    if (!isValidPosition && direction == DIRECTION_INSIDE) {
         return FALSE;
+    }
+
+    // If we're inside the layer, check direction
+    if (isValidPosition) {
+        // Early return based on direction and current pixel transparency
+        if ((direction == DIRECTION_INSIDE && isTransparent) ||
+            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+            return FALSE;
+        }
     }
 
     // Track the shortest distance to a transparency transition
@@ -299,11 +324,18 @@ IsEdgePixel16(
 
             // Determine neighbor transparency
             PF_Boolean neighborIsTransparent = TRUE; // Default for out-of-bounds
+            PF_Boolean neighborIsValid = FALSE;
 
             if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                neighborIsValid = TRUE;
                 // Pixel is in bounds, get its actual value
                 PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
                 neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
+
+            // If both current position and neighbor are outside layer, skip
+            if (!isValidPosition && !neighborIsValid) {
+                continue;
             }
 
             // Check if this is an edge based on direction
@@ -334,8 +366,6 @@ IsEdgePixel16(
     // If we found an edge and it's within the thickness, this is an edge pixel
     return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
 }
-
-// SmartFX Pre-Render function
 static PF_Err
 PreRender(
     PF_InData* in_data,
@@ -346,60 +376,61 @@ PreRender(
     PF_RenderRequest req = extra->input->output_request;
     PF_CheckoutResult in_result;
 
-    // Checkout the input buffer - we need the entire frame to detect edges
+    // Checkout the input buffer
     ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
-    // Get thickness parameter to determine how much to expand the output area
+    // Get thickness parameter
     PF_ParamDef thickness_param;
     AEFX_CLR_STRUCT(thickness_param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &thickness_param));
 
-    // Get direction parameter to adjust expansion
+    // Get direction parameter
     PF_ParamDef direction_param;
     AEFX_CLR_STRUCT(direction_param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_DIRECTION, in_data->current_time, in_data->time_step, in_data->time_scale, &direction_param));
 
-    // Process the floating point thickness into pixels
+    // Process thickness
     PF_FpLong thickness = thickness_param.u.fs_d.value;
     A_long direction = direction_param.u.pd.value;
 
-    // Apply non-linear scaling for better control at larger thicknesses
+    // Apply non-linear scaling
     float pixelThickness;
-
     if (thickness <= 0.0f) {
         pixelThickness = 0.0f;
     }
     else if (thickness <= 10.0f) {
-        // For small values, use direct mapping for precision
         pixelThickness = thickness;
     }
     else {
-        // For larger values, use square root scaling for more gradual increase
         float normalizedThickness = (thickness - 10.0f) / 90.0f;
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
-    // Apply resolution factor correctly
+    // Calculate downsampling factors
     float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
     float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
-    // Calculate effective thickness based on direction mode
+    // Calculate effective thickness
     float effectiveThickness = pixelThickness;
     if (direction == DIRECTION_BOTH) {
         effectiveThickness = pixelThickness / 2.0f;
     }
 
-    // Calculate border expansion amount in pixels with extra margin
-    A_long borderExpansion = (A_long)ceil(effectiveThickness * resolution_factor + 5.0f);
+    // Apply resolution factor - divide by resolution factor
+    // Add a very generous margin to ensure border is fully displayed
+    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 50;
 
-    // Use the checkout ID directly
+    // Store input checkout ID
     extra->output->pre_render_data = (void*)BORDER_INPUT;
 
-    // Pass through the input's rect
+    // Set expanded output rects
     extra->output->result_rect = in_result.result_rect;
+    extra->output->result_rect.left -= borderExpansion;
+    extra->output->result_rect.top -= borderExpansion;
+    extra->output->result_rect.right += borderExpansion;
+    extra->output->result_rect.bottom += borderExpansion;
 
-    // Expand the max result rect by the border thickness
     extra->output->max_result_rect = in_result.max_result_rect;
     extra->output->max_result_rect.left -= borderExpansion;
     extra->output->max_result_rect.top -= borderExpansion;
@@ -422,176 +453,230 @@ SmartRender(
     PF_Err err = PF_Err_NONE;
     AEGP_SuiteHandler suites(in_data->pica_basicP);
 
-    // Get the pre-render data (checkout ID)
+    // Get input checkout ID
     A_long checkout_id = (A_long)extra->input->pre_render_data;
 
-    // Get the input and output
+    // Get input and output
     PF_EffectWorld* input = NULL;
     PF_EffectWorld* output = NULL;
 
-    // Checkout the input pixels
+    // Checkout pixels
     ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, checkout_id, &input));
     if (err) return err;
 
-    // Checkout the output buffer
     ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
     if (err) return err;
 
-    // Parameter variables - floating point thickness
+    // Parameter variables
     PF_FpLong thickness = BORDER_THICKNESS_DFLT;
     PF_Pixel8 color = { 255, 0, 0, 255 }; // Default to red
     A_u_char threshold = BORDER_THRESHOLD_DFLT;
     A_long direction = BORDER_DIRECTION_DFLT;
     PF_Boolean showLineOnly = FALSE;
 
-    // Get parameter values
+    // Get parameters
     PF_ParamDef param;
 
-    // Get thickness parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) thickness = param.u.fs_d.value; // Using floating point value
+    if (!err) thickness = param.u.fs_d.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    // Get color parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_COLOR, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
     if (!err) color = param.u.cd.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    // Get threshold parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THRESHOLD, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
     if (!err) threshold = (A_u_char)param.u.sd.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    // Get direction parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_DIRECTION, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
     if (!err) direction = param.u.pd.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    // Get show line only parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_SHOW_LINE_ONLY, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
     if (!err) showLineOnly = param.u.bd.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    // Calculate downsampling factors exactly like in MultiSlicer
+    // Calculate downsampling factors
     float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
     float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
-    // Process the floating point thickness into pixels with non-linear scaling
+    // Process thickness
     float pixelThickness;
-
     if (thickness <= 0.0f) {
         pixelThickness = 0.0f;
     }
     else if (thickness <= 10.0f) {
-        // For small values, use direct mapping for precision
         pixelThickness = thickness;
     }
     else {
-        // For larger values, use square root scaling for more gradual increase
         float normalizedThickness = (thickness - 10.0f) / 90.0f;
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
-    // Apply resolution factor - exactly like MultiSlicer
-    A_long thicknessInt = (A_long)(pixelThickness * resolution_factor + 0.5f);
+    // Apply resolution factor
+    A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
 
     if (input && output) {
-        // Calculate input to output offset (important for drawing outside layer bounds)
-        A_long x_offset = output->origin_x - input->origin_x;
-        A_long y_offset = output->origin_y - input->origin_y;
-
-        // First, copy the input to output if we're not in "show line only" mode
-        if (!showLineOnly) {
-            ERR(suites.WorldTransformSuite1()->copy(
-                in_data->effect_ref,
-                input,
-                output,
-                NULL,
-                NULL
-            ));
+        // ===============================================
+        // STEP 1: Clear the output buffer to transparency
+        // ===============================================
+        if (PF_WORLD_IS_DEEP(output)) {
+            for (A_long y = 0; y < output->height; y++) {
+                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
+                for (A_long x = 0; x < output->width; x++) {
+                    outData[x].alpha = 0;
+                    outData[x].red = 0;
+                    outData[x].green = 0;
+                    outData[x].blue = 0;
+                }
+            }
         }
         else {
-            // If "show line only", start with a blank (transparent) output
-            // Manual fill with transparency (all zeros)
+            for (A_long y = 0; y < output->height; y++) {
+                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
+                for (A_long x = 0; x < output->width; x++) {
+                    outData[x].alpha = 0;
+                    outData[x].red = 0;
+                    outData[x].green = 0;
+                    outData[x].blue = 0;
+                }
+            }
+        }
+
+        // ==========================================
+        // STEP 2: Copy the source layer if not "show line only"
+        // ==========================================
+        if (!showLineOnly) {
+            // First, we need to calculate the proper alignment for the input layer
+            // Since the output buffer has been expanded, we need to determine where the
+            // input layer should be positioned within it
+
+            // Get the offset between origins - this is the critical calculation
+            A_long offsetX = input->origin_x - output->origin_x;
+            A_long offsetY = input->origin_y - output->origin_y;
+
             if (PF_WORLD_IS_DEEP(output)) {
-                // 16-bit fill
-                for (A_long y = 0; y < output->height; y++) {
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-                    for (A_long x = 0; x < output->width; x++) {
-                        outData[x].alpha = 0;
-                        outData[x].red = 0;
-                        outData[x].green = 0;
-                        outData[x].blue = 0;
+                // 16-bit processing
+                for (A_long y = 0; y < input->height; y++) {
+                    // Calculate output y-coordinate
+                    A_long outY = y + offsetY;
+
+                    // Skip if out of bounds
+                    if (outY < 0 || outY >= output->height) continue;
+
+                    PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+
+                    for (A_long x = 0; x < input->width; x++) {
+                        // Calculate output x-coordinate
+                        A_long outX = x + offsetX;
+
+                        // Skip if out of bounds
+                        if (outX < 0 || outX >= output->width) continue;
+
+                        // Copy exact pixel
+                        outData[outX] = inData[x];
                     }
                 }
             }
             else {
-                // 8-bit fill
-                for (A_long y = 0; y < output->height; y++) {
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-                    for (A_long x = 0; x < output->width; x++) {
-                        outData[x].alpha = 0;
-                        outData[x].red = 0;
-                        outData[x].green = 0;
-                        outData[x].blue = 0;
+                // 8-bit processing
+                for (A_long y = 0; y < input->height; y++) {
+                    // Calculate output y-coordinate
+                    A_long outY = y + offsetY;
+
+                    // Skip if out of bounds
+                    if (outY < 0 || outY >= output->height) continue;
+
+                    PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
+
+                    for (A_long x = 0; x < input->width; x++) {
+                        // Calculate output x-coordinate
+                        A_long outX = x + offsetX;
+
+                        // Skip if out of bounds
+                        if (outX < 0 || outX >= output->width) continue;
+
+                        // Copy exact pixel
+                        outData[outX] = inData[x];
                     }
                 }
             }
         }
 
-        // Process based on bit depth
+        // ==========================================
+        // STEP 3: Draw the border
+        // ==========================================
+        // Create a border using the same coordinate system as the input layer
+        // Then map these coordinates to the output buffer
+
+        // First define our search area - extend beyond input layer bounds
+        A_long search_margin = thicknessInt + 5; // Add safety margin
+        A_long search_left = -search_margin;
+        A_long search_top = -search_margin;
+        A_long search_right = input->width + search_margin;
+        A_long search_bottom = input->height + search_margin;
+
+        // Get the offset between origins
+        A_long offsetX = input->origin_x - output->origin_x;
+        A_long offsetY = input->origin_y - output->origin_y;
+
         if (PF_WORLD_IS_DEEP(output)) {
             // 16-bit processing
-            A_u_short threshold16 = threshold * 257; // Convert 8-bit to 16-bit threshold
+            A_u_short threshold16 = threshold * 257;
             PF_Pixel16 edge_color;
 
-            // Convert 8-bit color to 16-bit
             edge_color.alpha = PF_MAX_CHAN16;
             edge_color.red = PF_BYTE_TO_CHAR(color.red);
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            // Loop through entire output buffer (may extend beyond input)
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
+            // Loop through the extended search area in input coordinates
+            for (A_long y = search_top; y < search_bottom; y++) {
+                for (A_long x = search_left; x < search_right; x++) {
+                    // Check if this is a border pixel in input coordinates
+                    if (IsEdgePixel16(input, x, y, threshold16, thicknessInt, direction)) {
+                        // Convert to output coordinates
+                        A_long outX = x + offsetX;
+                        A_long outY = y + offsetY;
 
-                for (A_long x = 0; x < output->width; x++) {
-                    // Convert output coordinates to input coordinates
-                    A_long input_x = x - x_offset;
-                    A_long input_y = y - y_offset;
-
-                    // Check if this pixel should be an edge
-                    if (IsEdgePixel16(input, input_x, input_y, threshold16, thicknessInt, direction)) {
-                        // This is an edge pixel, draw with border color
-                        outData[x] = edge_color;
+                        // Check if within output bounds
+                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
+                            // Draw the border pixel
+                            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+                            outData[outX] = edge_color;
+                        }
                     }
                 }
             }
         }
         else {
             // 8-bit processing
-            // Loop through entire output buffer (may extend beyond input)
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
+            for (A_long y = search_top; y < search_bottom; y++) {
+                for (A_long x = search_left; x < search_right; x++) {
+                    // Check if this is a border pixel in input coordinates
+                    if (IsEdgePixel8(input, x, y, threshold, thicknessInt, direction)) {
+                        // Convert to output coordinates
+                        A_long outX = x + offsetX;
+                        A_long outY = y + offsetY;
 
-                for (A_long x = 0; x < output->width; x++) {
-                    // Convert output coordinates to input coordinates
-                    A_long input_x = x - x_offset;
-                    A_long input_y = y - y_offset;
-
-                    // Check if this pixel should be an edge
-                    if (IsEdgePixel8(input, input_x, input_y, threshold, thicknessInt, direction)) {
-                        // This is an edge pixel, draw with border color
-                        outData[x].alpha = PF_MAX_CHAN8;
-                        outData[x].red = color.red;
-                        outData[x].green = color.green;
-                        outData[x].blue = color.blue;
+                        // Check if within output bounds
+                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
+                            // Draw the border pixel
+                            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
+                            outData[outX].alpha = PF_MAX_CHAN8;
+                            outData[outX].red = color.red;
+                            outData[outX].green = color.green;
+                            outData[outX].blue = color.blue;
+                        }
                     }
                 }
             }
