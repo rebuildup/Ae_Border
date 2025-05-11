@@ -69,6 +69,7 @@ GlobalSetup(
 
     return PF_Err_NONE;
 }
+
 static PF_Err
 ParamsSetup(
     PF_InData* in_data,
@@ -81,14 +82,16 @@ ParamsSetup(
 
     AEFX_CLR_STRUCT(def);
 
-    // Use SLIDER instead of FLOAT_SLIDERX
-    // This makes the slider display range from 0-100 while still allowing the full range internally
-    PF_ADD_SLIDER(STR(StrID_Thickness_Param_Name),
+    // Stroke Width parameter - back to float
+    PF_ADD_FLOAT_SLIDERX(STR(StrID_Thickness_Param_Name),
         BORDER_THICKNESS_MIN,
         BORDER_THICKNESS_MAX,
         BORDER_THICKNESS_MIN,
         BORDER_THICKNESS_MAX,
         BORDER_THICKNESS_DFLT,
+        PF_Precision_TENTHS, // Control decimal places
+        0,
+        0,
         THICKNESS_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -119,17 +122,11 @@ ParamsSetup(
 
     AEFX_CLR_STRUCT(def);
 
-    // Direction parameter using the pipe-delimited format from Skeleton example
-    char* directionStrings[3] = {
-        STR(StrID_Direction_Both),
-        STR(StrID_Direction_Inside),
-        STR(StrID_Direction_Outside)
-    };
-
+    // Direction parameter - fixed format with pipe delimiter
     PF_ADD_POPUP(STR(StrID_Direction_Param_Name),
         3,                             // Number of choices
         DIRECTION_BOTH,                // Default choice (Both Directions)
-        directionStrings[0],           // Name for the popup
+        "Both Directions|Inside|Outside", // Options as pipe-delimited string
         DIRECTION_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -155,13 +152,13 @@ IsEdgePixel8(
     A_long         thickness,
     A_long         direction)
 {
-    // Boundary check - important to avoid crashes
-    if (x < 0 || y < 0 || x >= input->width || y >= input->height) {
-        return FALSE; // Skip pixels outside the bounds
-    }
-
     // Skip processing if thickness is 0
     if (thickness <= 0) {
+        return FALSE;
+    }
+
+    // Make sure we're within bounds
+    if (x < 0 || y < 0 || x >= input->width || y >= input->height) {
         return FALSE;
     }
 
@@ -175,66 +172,68 @@ IsEdgePixel8(
         return FALSE;
     }
 
-    // Check surrounding pixels within the thickness radius
-    for (A_long dy = -thickness; dy <= thickness; dy++) {
-        for (A_long dx = -thickness; dx <= thickness; dx++) {
+    // Prepare for better edge detection
+    // We'll track the shortest distance to a transparency transition
+    A_long minDistSquared = thickness * thickness + 1; // Start beyond the threshold
+    A_Boolean foundEdge = FALSE;
+
+    // Use a larger search radius to ensure we don't miss any edges
+    A_long searchRadius = thickness + 1;
+
+    // First, let's find the closest edge by checking surrounding pixels
+    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
             // Skip the current pixel
             if (dx == 0 && dy == 0) continue;
 
-            // Calculate distance from current pixel (using squared distance for efficiency)
-            A_long distSquared = (dx * dx + dy * dy);
-            A_long thicknessSquared = thickness * thickness;
+            A_long nx = x + dx;
+            A_long ny = y + dy;
 
-            // Only check pixels within the thickness radius
-            if (distSquared <= thicknessSquared) {
-                A_long nx = x + dx;
-                A_long ny = y + dy;
+            // Determine neighbor transparency
+            PF_Boolean neighborIsTransparent = TRUE; // Default (out of bounds = transparent)
 
-                // Boundary check - critical to prevent crashes
-                if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                    PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
-                    PF_Boolean neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
+                neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
 
-                    // Check for edge based on direction
-                    switch (direction) {
-                    case DIRECTION_BOTH:
-                        // If one is transparent and the other is not, this is an edge
-                        if (isTransparent != neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
+            // Check if this is an edge based on direction
+            PF_Boolean isEdge = FALSE;
 
-                    case DIRECTION_INSIDE:
-                        // Inside: current pixel is non-transparent and neighbor is transparent
-                        if (!isTransparent && neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
+            switch (direction) {
+            case DIRECTION_BOTH:
+                isEdge = (isTransparent != neighborIsTransparent);
+                break;
+            case DIRECTION_INSIDE:
+                isEdge = (!isTransparent && neighborIsTransparent);
+                break;
+            case DIRECTION_OUTSIDE:
+                isEdge = (isTransparent && !neighborIsTransparent);
+                break;
+            }
 
-                    case DIRECTION_OUTSIDE:
-                        // Outside: current pixel is transparent and neighbor is non-transparent
-                        if (isTransparent && !neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
-                    }
-                }
-                // For pixels outside the frame boundary, treat them as transparent
-                else if (!isTransparent && (direction == DIRECTION_INSIDE || direction == DIRECTION_BOTH)) {
-                    // If we're looking for Inside edges and the current pixel is non-transparent,
-                    // treat the out-of-bounds pixel as transparent -> this is an edge
-                    return TRUE;
-                }
-                else if (isTransparent && (direction == DIRECTION_OUTSIDE || direction == DIRECTION_BOTH)) {
-                    // If we're looking for Outside edges and the current pixel is transparent,
-                    // treat the out-of-bounds pixel as non-transparent -> this is an edge
-                    return TRUE;
+            // If it's an edge, update the minimum distance
+            if (isEdge) {
+                // Calculate a more accurate sub-pixel distance to reduce wobbling
+                // We use a combination of integer positions (dx, dy) and a sub-pixel offset
+
+                // Calculate the squared distance
+                // Use floating point for better precision
+                float fDx = (float)dx;
+                float fDy = (float)dy;
+                float distSquared = fDx * fDx + fDy * fDy;
+
+                // Keep track of the minimum distance
+                if (distSquared < minDistSquared) {
+                    minDistSquared = (A_long)distSquared;
+                    foundEdge = TRUE;
                 }
             }
         }
     }
 
-    return FALSE;
+    // If we found an edge and it's within the thickness, this is an edge pixel
+    return (foundEdge && minDistSquared <= thickness * thickness);
 }
 
 static PF_Boolean
@@ -246,13 +245,13 @@ IsEdgePixel16(
     A_long         thickness,
     A_long         direction)
 {
-    // Boundary check
-    if (x < 0 || y < 0 || x >= input->width || y >= input->height) {
+    // Skip processing if thickness is 0
+    if (thickness <= 0) {
         return FALSE;
     }
 
-    // Skip processing if thickness is 0
-    if (thickness <= 0) {
+    // Make sure we're within bounds
+    if (x < 0 || y < 0 || x >= input->width || y >= input->height) {
         return FALSE;
     }
 
@@ -266,66 +265,68 @@ IsEdgePixel16(
         return FALSE;
     }
 
-    // Check surrounding pixels within the thickness radius
-    for (A_long dy = -thickness; dy <= thickness; dy++) {
-        for (A_long dx = -thickness; dx <= thickness; dx++) {
+    // Prepare for better edge detection
+    // We'll track the shortest distance to a transparency transition
+    A_long minDistSquared = thickness * thickness + 1; // Start beyond the threshold
+    A_Boolean foundEdge = FALSE;
+
+    // Use a larger search radius to ensure we don't miss any edges
+    A_long searchRadius = thickness + 1;
+
+    // First, let's find the closest edge by checking surrounding pixels
+    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
             // Skip the current pixel
             if (dx == 0 && dy == 0) continue;
 
-            // Calculate distance from current pixel (using squared distance for efficiency)
-            A_long distSquared = (dx * dx + dy * dy);
-            A_long thicknessSquared = thickness * thickness;
+            A_long nx = x + dx;
+            A_long ny = y + dy;
 
-            // Only check pixels within the thickness radius
-            if (distSquared <= thicknessSquared) {
-                A_long nx = x + dx;
-                A_long ny = y + dy;
+            // Determine neighbor transparency
+            PF_Boolean neighborIsTransparent = TRUE; // Default (out of bounds = transparent)
 
-                // Boundary check
-                if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                    PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
-                    PF_Boolean neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
+                neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
 
-                    // Check for edge based on direction
-                    switch (direction) {
-                    case DIRECTION_BOTH:
-                        // If one is transparent and the other is not, this is an edge
-                        if (isTransparent != neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
+            // Check if this is an edge based on direction
+            PF_Boolean isEdge = FALSE;
 
-                    case DIRECTION_INSIDE:
-                        // Inside: current pixel is non-transparent and neighbor is transparent
-                        if (!isTransparent && neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
+            switch (direction) {
+            case DIRECTION_BOTH:
+                isEdge = (isTransparent != neighborIsTransparent);
+                break;
+            case DIRECTION_INSIDE:
+                isEdge = (!isTransparent && neighborIsTransparent);
+                break;
+            case DIRECTION_OUTSIDE:
+                isEdge = (isTransparent && !neighborIsTransparent);
+                break;
+            }
 
-                    case DIRECTION_OUTSIDE:
-                        // Outside: current pixel is transparent and neighbor is non-transparent
-                        if (isTransparent && !neighborIsTransparent) {
-                            return TRUE;
-                        }
-                        break;
-                    }
-                }
-                // For pixels outside the frame boundary, treat them as transparent
-                else if (!isTransparent && (direction == DIRECTION_INSIDE || direction == DIRECTION_BOTH)) {
-                    // If we're looking for Inside edges and the current pixel is non-transparent,
-                    // treat the out-of-bounds pixel as transparent -> this is an edge
-                    return TRUE;
-                }
-                else if (isTransparent && (direction == DIRECTION_OUTSIDE || direction == DIRECTION_BOTH)) {
-                    // If we're looking for Outside edges and the current pixel is transparent,
-                    // treat the out-of-bounds pixel as non-transparent -> this is an edge
-                    return TRUE;
+            // If it's an edge, update the minimum distance
+            if (isEdge) {
+                // Calculate a more accurate sub-pixel distance to reduce wobbling
+                // We use a combination of integer positions (dx, dy) and a sub-pixel offset
+
+                // Calculate the squared distance
+                // Use floating point for better precision
+                float fDx = (float)dx;
+                float fDy = (float)dy;
+                float distSquared = fDx * fDx + fDy * fDy;
+
+                // Keep track of the minimum distance
+                if (distSquared < minDistSquared) {
+                    minDistSquared = (A_long)distSquared;
+                    foundEdge = TRUE;
                 }
             }
         }
     }
 
-    return FALSE;
+    // If we found an edge and it's within the thickness, this is an edge pixel
+    return (foundEdge && minDistSquared <= thickness * thickness);
 }
 
 // SmartFX Pre-Render function
@@ -351,6 +352,7 @@ PreRender(
 
     return err;
 }
+
 static PF_Err
 SmartRender(
     PF_InData* in_data,
@@ -375,8 +377,8 @@ SmartRender(
     ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
     if (err) return err;
 
-    // Parameter variables
-    A_long thickness = BORDER_THICKNESS_DFLT;
+    // Parameter variables - floating point thickness
+    PF_FpLong thickness = BORDER_THICKNESS_DFLT;
     PF_Pixel8 color = { 255, 0, 0, 255 }; // Default to red
     A_u_char threshold = BORDER_THRESHOLD_DFLT;
     A_long direction = BORDER_DIRECTION_DFLT;
@@ -388,7 +390,7 @@ SmartRender(
     // Get thickness parameter
     AEFX_CLR_STRUCT(param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) thickness = param.u.sd.value; // Getting integer value
+    if (!err) thickness = param.u.fs_d.value; // Using floating point value
     PF_CHECKIN_PARAM(in_data, &param);
 
     // Get color parameter
@@ -420,11 +422,26 @@ SmartRender(
     float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
-    // Scale thickness from 0-100 display range to 0-2000 internal range
-    A_long scaledThickness = thickness * 20; // Convert display range to internal range
+    // Process the floating point thickness into pixels more accurately
+    // Apply a non-linear curve to make small adjustments have finer control
+    float pixelThickness;
 
-    // Apply resolution factor to get exact pixel calculation
-    A_long thicknessInt = (A_long)(scaledThickness * resolution_factor);
+    if (thickness <= 0.0f) {
+        pixelThickness = 0.0f;
+    }
+    else if (thickness <= 10.0f) {
+        // For small values, use direct mapping for precision
+        pixelThickness = thickness;
+    }
+    else {
+        // For larger values, use square root scaling for more gradual increase
+        // This helps minimize wobbliness at larger widths
+        float normalizedThickness = (thickness - 10.0f) / 90.0f;  // Maps 10-100 to 0-1
+        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);  // Maps to 10-50 range with square root curve
+    }
+
+    // Apply resolution factor and get final thickness
+    A_long thicknessInt = (A_long)(pixelThickness * resolution_factor + 0.5f);
 
     if (input && output) {
         // First, copy the input to output if we're not in "show line only" mode

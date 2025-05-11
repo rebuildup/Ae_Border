@@ -69,10 +69,10 @@ typedef unsigned short PixelType;
 
 /* Parameter defaults */
 
-// Change from floating point to integer
-#define BORDER_THICKNESS_MIN     0
-#define BORDER_THICKNESS_MAX     100
-#define BORDER_THICKNESS_DFLT    1
+// Change back to floating point
+#define BORDER_THICKNESS_MIN     0.0
+#define BORDER_THICKNESS_MAX     2000.0
+#define BORDER_THICKNESS_DFLT    1.0
 
 #define BORDER_THRESHOLD_MIN     0
 #define BORDER_THRESHOLD_MAX     255
