@@ -896,10 +896,10 @@ PF_Err PluginDataEntryFunction2(
         inPluginDataCallBackPtr,
         "Border", // Name
         "ADBE Border", // Match Name
-        "361do_plug", // Category
+        "Border", // Category
         AE_RESERVED_INFO, // Reserved Info
         "EffectMain",     // Entry point
-        "https://www.adobe.com");    // support URL
+        "https://github.com/rebuildup/Ae_Border");    // support URL
 
     return result;
 }

@@ -36,8 +36,7 @@ typedef short int			int16;
 #define PF_TABLE_BITS	12
 #define PF_TABLE_SZ_16	4096
 
-#define PF_DEEP_COLOR_AWARE 1	// make sure we get 16bpc pixels; 
-// AE_Effect.h checks for this.
+#define PF_DEEP_COLOR_AWARE 1
 
 #include "AEConfig.h"
 
@@ -96,7 +95,7 @@ enum {
     BORDER_THICKNESS,
     BORDER_COLOR,
     BORDER_THRESHOLD,
-    BORDER_DIRECTION,        // New parameter
+    BORDER_DIRECTION,        
     BORDER_SHOW_LINE_ONLY,
     BORDER_NUM_PARAMS
 };
@@ -105,12 +104,12 @@ enum {
     THICKNESS_DISK_ID = 1,
     COLOR_DISK_ID,
     THRESHOLD_DISK_ID,
-    DIRECTION_DISK_ID,      // New disk ID
+    DIRECTION_DISK_ID,     
     SHOW_LINE_ONLY_DISK_ID
 };
 
 typedef struct BorderInfo {
-    A_long      thickness;      // Changed from PF_FpLong to A_long
+    A_long      thickness;    
     PF_Pixel    color;
     A_u_char    threshold;
     A_long      direction;

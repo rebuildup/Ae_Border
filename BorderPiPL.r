@@ -64,7 +64,7 @@ resource 'PiPL' (16000) {
         },
         /* [13] */
         AE_Effect_Support_URL {
-            "https://www.adobe.com"
+            "https://github.com/rebuildup/Ae_Border"
         }
     }
 };
