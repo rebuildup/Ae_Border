@@ -1,47 +1,12 @@
-﻿/*******************************************************************/
-/*                                                                 */
-/*                      ADOBE CONFIDENTIAL                         */
-/*                   _ _ _ _ _ _ _ _ _ _ _ _                     */
-/*                                                                 */
-/* Copyright 2007-2023 Adobe Inc.                                  */
-/* All Rights Reserved.                                            */
-/*                                                                 */
-/* NOTICE:  All information contained herein is, and remains the   */
-/* property of Adobe Inc. and its suppliers, if                    */
-/* any.  The intellectual and technical concepts contained         */
-/* herein are proprietary to Adobe Inc. and its                    */
-/* suppliers and may be covered by U.S. and Foreign Patents,       */
-/* patents in process, and are protected by trade secret or        */
-/* copyright law.  Dissemination of this information or            */
-/* reproduction of this material is strictly forbidden unless      */
-/* prior written permission is obtained from Adobe Inc.            */
-/* Incorporated.                                                   */
-/*                                                                 */
-/*******************************************************************/
-
-/*    Border.cpp
-
-    This effect generates a line between transparent and non-transparent pixels.
-
-    Revision History
-
-    Version        Change                                                Engineer    Date
-    =======        ======                                                ========    ======
-    1.0            Original plugin                                        bbb        6/1/2002
-    1.1            Added transparency edge detection                    anon        5/11/2025
-    1.2            Improved smoothing and performance                    anon        5/15/2025
-*/
-
-#include "Border.h"
+﻿#include "Border.h"
 #include <vector>
 #include <algorithm>
-#include <cfloat> // For FLT_MAX
+#include <cfloat>
 
 #ifdef _WIN32
-#include <omp.h>  // For OpenMP parallel processing
+#include <omp.h>
 #endif
 
-// Helper structure for edge detection
 struct EdgePoint {
     A_long x, y;
     bool isTransparent;
@@ -164,6 +129,230 @@ ParamsSetup(
     out_data->num_params = BORDER_NUM_PARAMS;
 
     return err;
+}
+static PF_Boolean
+IsEdgePixel8(
+    PF_EffectWorld* input,
+    A_long         x,
+    A_long         y,
+    A_u_char       threshold,
+    A_long         thickness,
+    A_long         direction)
+{
+    // Skip processing if thickness is 0
+    if (thickness <= 0) {
+        return FALSE;
+    }
+
+    // Get effective thickness - halve it for "Both Directions" mode
+    A_long effectiveThickness = thickness;
+    if (direction == DIRECTION_BOTH) {
+        effectiveThickness = (thickness + 1) / 2; // Add 1 before division to round up for odd values
+    }
+
+    // For pixels outside the input buffer, we need custom handling
+    PF_Boolean isTransparent = TRUE; // Default for out-of-bounds pixels
+    PF_Boolean isValidPosition = FALSE;
+
+    // Check if we're inside the input buffer
+    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
+        isValidPosition = TRUE;
+        // Get current pixel's alpha value
+        PF_Pixel8* currentPixel = (PF_Pixel8*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel8));
+        isTransparent = (currentPixel->alpha <= threshold);
+    }
+
+    // If we're outside the layer and want "inside" direction only, return early
+    if (!isValidPosition && direction == DIRECTION_INSIDE) {
+        return FALSE;
+    }
+
+    // If we're inside the layer, check direction
+    if (isValidPosition) {
+        // Early return based on direction and current pixel transparency
+        if ((direction == DIRECTION_INSIDE && isTransparent) ||
+            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+            return FALSE;
+        }
+    }
+
+    // Track the shortest distance to a transparency transition
+    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1); // Start beyond the threshold
+    PF_Boolean foundEdge = FALSE;
+
+    // Use a larger search radius to ensure we don't miss any edges
+    A_long searchRadius = effectiveThickness + 1;
+
+    // First, let's find the closest edge by checking surrounding pixels
+    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
+            // Skip the current pixel
+            if (dx == 0 && dy == 0) continue;
+
+            // Early distance check to speed up processing
+            A_long distSquared = dx * dx + dy * dy;
+            if (distSquared > effectiveThickness * effectiveThickness) {
+                continue; // Skip if too far away
+            }
+
+            A_long nx = x + dx;
+            A_long ny = y + dy;
+
+            // Determine neighbor transparency
+            PF_Boolean neighborIsTransparent = TRUE; // Default for out-of-bounds
+            PF_Boolean neighborIsValid = FALSE;
+
+            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                neighborIsValid = TRUE;
+                // Pixel is in bounds, get its actual value
+                PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
+                neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
+
+            // If both current position and neighbor are outside layer, skip
+            if (!isValidPosition && !neighborIsValid) {
+                continue;
+            }
+
+            // Check if this is an edge based on direction
+            PF_Boolean isEdge = FALSE;
+
+            switch (direction) {
+            case DIRECTION_BOTH:
+                isEdge = (isTransparent != neighborIsTransparent);
+                break;
+            case DIRECTION_INSIDE:
+                isEdge = (!isTransparent && neighborIsTransparent);
+                break;
+            case DIRECTION_OUTSIDE:
+                isEdge = (isTransparent && !neighborIsTransparent);
+                break;
+            }
+
+            // If it's an edge, update the minimum distance
+            if (isEdge) {
+                if (distSquared < minDistSquared) {
+                    minDistSquared = (float)distSquared;
+                    foundEdge = TRUE;
+                }
+            }
+        }
+    }
+
+    // If we found an edge and it's within the thickness, this is an edge pixel
+    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
+}
+static PF_Boolean
+IsEdgePixel16(
+    PF_EffectWorld* input,
+    A_long         x,
+    A_long         y,
+    A_u_short      threshold,
+    A_long         thickness,
+    A_long         direction)
+{
+    // Skip processing if thickness is 0
+    if (thickness <= 0) {
+        return FALSE;
+    }
+
+    // Get effective thickness - halve it for "Both Directions" mode
+    A_long effectiveThickness = thickness;
+    if (direction == DIRECTION_BOTH) {
+        effectiveThickness = (thickness + 1) / 2; // Add 1 before division to round up for odd values
+    }
+
+    // For pixels outside the input buffer, we need custom handling
+    PF_Boolean isTransparent = TRUE; // Default for out-of-bounds pixels
+    PF_Boolean isValidPosition = FALSE;
+
+    // Check if we're inside the input buffer
+    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
+        isValidPosition = TRUE;
+        // Get current pixel's alpha value
+        PF_Pixel16* currentPixel = (PF_Pixel16*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel16));
+        isTransparent = (currentPixel->alpha <= threshold);
+    }
+
+    // If we're outside the layer and want "inside" direction only, return early
+    if (!isValidPosition && direction == DIRECTION_INSIDE) {
+        return FALSE;
+    }
+
+    // If we're inside the layer, check direction
+    if (isValidPosition) {
+        // Early return based on direction and current pixel transparency
+        if ((direction == DIRECTION_INSIDE && isTransparent) ||
+            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
+            return FALSE;
+        }
+    }
+
+    // Track the shortest distance to a transparency transition
+    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1); // Start beyond the threshold
+    PF_Boolean foundEdge = FALSE;
+
+    // Use a larger search radius to ensure we don't miss any edges
+    A_long searchRadius = effectiveThickness + 1;
+
+    // First, let's find the closest edge by checking surrounding pixels
+    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
+            // Skip the current pixel
+            if (dx == 0 && dy == 0) continue;
+
+            // Early distance check to speed up processing
+            A_long distSquared = dx * dx + dy * dy;
+            if (distSquared > effectiveThickness * effectiveThickness) {
+                continue; // Skip if too far away
+            }
+
+            A_long nx = x + dx;
+            A_long ny = y + dy;
+
+            // Determine neighbor transparency
+            PF_Boolean neighborIsTransparent = TRUE; // Default for out-of-bounds
+            PF_Boolean neighborIsValid = FALSE;
+
+            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
+                neighborIsValid = TRUE;
+                // Pixel is in bounds, get its actual value
+                PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
+                neighborIsTransparent = (neighborPixel->alpha <= threshold);
+            }
+
+            // If both current position and neighbor are outside layer, skip
+            if (!isValidPosition && !neighborIsValid) {
+                continue;
+            }
+
+            // Check if this is an edge based on direction
+            PF_Boolean isEdge = FALSE;
+
+            switch (direction) {
+            case DIRECTION_BOTH:
+                isEdge = (isTransparent != neighborIsTransparent);
+                break;
+            case DIRECTION_INSIDE:
+                isEdge = (!isTransparent && neighborIsTransparent);
+                break;
+            case DIRECTION_OUTSIDE:
+                isEdge = (isTransparent && !neighborIsTransparent);
+                break;
+            }
+
+            // If it's an edge, update the minimum distance
+            if (isEdge) {
+                if (distSquared < minDistSquared) {
+                    minDistSquared = (float)distSquared;
+                    foundEdge = TRUE;
+                }
+            }
+        }
+    }
+
+    // If we found an edge and it's within the thickness, this is an edge pixel
+    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
 }
 
 // Optimized distance field generation
@@ -407,30 +596,24 @@ PreRender(
     }
 
     // Apply resolution factor - divide by resolution factor
-    // Use a reasonable margin
-    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 5;
+    // Add a very generous margin to ensure border is fully displayed
+    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 50;
 
     // Store input checkout ID
     extra->output->pre_render_data = (void*)BORDER_INPUT;
 
-    // Store the request rect for reference - this is important!
-    PF_Rect request_rect = extra->input->output_request.rect;
+    // Set expanded output rects
+    extra->output->result_rect = in_result.result_rect;
+    extra->output->result_rect.left -= borderExpansion;
+    extra->output->result_rect.top -= borderExpansion;
+    extra->output->result_rect.right += borderExpansion;
+    extra->output->result_rect.bottom += borderExpansion;
 
-    // First, set up our desired result rect based on input
-    PF_Rect desired_result = in_result.result_rect;
-    desired_result.left -= borderExpansion;
-    desired_result.top -= borderExpansion;
-    desired_result.right += borderExpansion;
-    desired_result.bottom += borderExpansion;
-
-    // Now intersect with the request rect to ensure we don't exceed it
-    extra->output->result_rect.left = MAX(desired_result.left, request_rect.left);
-    extra->output->result_rect.top = MAX(desired_result.top, request_rect.top);
-    extra->output->result_rect.right = MIN(desired_result.right, request_rect.right);
-    extra->output->result_rect.bottom = MIN(desired_result.bottom, request_rect.bottom);
-
-    // Set max_result_rect - should be contained within request rect as well
-    extra->output->max_result_rect = extra->output->result_rect;
+    extra->output->max_result_rect = in_result.max_result_rect;
+    extra->output->max_result_rect.left -= borderExpansion;
+    extra->output->max_result_rect.top -= borderExpansion;
+    extra->output->max_result_rect.right += borderExpansion;
+    extra->output->max_result_rect.bottom += borderExpansion;
 
     // Clean up
     PF_CHECKIN_PARAM(in_data, &thickness_param);
@@ -438,7 +621,6 @@ PreRender(
 
     return err;
 }
-
 static PF_Err
 SmartRender(
     PF_InData* in_data,
@@ -516,17 +698,13 @@ SmartRender(
     }
 
     // Apply resolution factor
-    float thicknessFloat = pixelThickness / resolution_factor;
-    A_long thicknessInt = (A_long)(thicknessFloat + 0.5f);
+    A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
 
-    if (input && output && thicknessInt > 0) {
+    if (input && output) {
         // ===============================================
         // STEP 1: Clear the output buffer to transparency
         // ===============================================
         if (PF_WORLD_IS_DEEP(output)) {
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
             for (A_long y = 0; y < output->height; y++) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
                 for (A_long x = 0; x < output->width; x++) {
@@ -538,9 +716,6 @@ SmartRender(
             }
         }
         else {
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
             for (A_long y = 0; y < output->height; y++) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
                 for (A_long x = 0; x < output->width; x++) {
@@ -556,15 +731,16 @@ SmartRender(
         // STEP 2: Copy the source layer if not "show line only"
         // ==========================================
         if (!showLineOnly) {
-            // Calculate the proper alignment for the input layer
+            // First, we need to calculate the proper alignment for the input layer
+            // Since the output buffer has been expanded, we need to determine where the
+            // input layer should be positioned within it
+
+            // Get the offset between origins - this is the critical calculation
             A_long offsetX = input->origin_x - output->origin_x;
             A_long offsetY = input->origin_y - output->origin_y;
 
             if (PF_WORLD_IS_DEEP(output)) {
                 // 16-bit processing
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
                 for (A_long y = 0; y < input->height; y++) {
                     // Calculate output y-coordinate
                     A_long outY = y + offsetY;
@@ -589,9 +765,6 @@ SmartRender(
             }
             else {
                 // 8-bit processing
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
                 for (A_long y = 0; y < input->height; y++) {
                     // Calculate output y-coordinate
                     A_long outY = y + offsetY;
@@ -617,172 +790,69 @@ SmartRender(
         }
 
         // ==========================================
-        // STEP 3: Generate distance field
+        // STEP 3: Draw the border
         // ==========================================
-        // Define search area - use the output dimensions with a border offset
+        // Create a border using the same coordinate system as the input layer
+        // Then map these coordinates to the output buffer
+
+        // First define our search area - extend beyond input layer bounds
         A_long search_margin = thicknessInt + 5; // Add safety margin
+        A_long search_left = -search_margin;
+        A_long search_top = -search_margin;
+        A_long search_right = input->width + search_margin;
+        A_long search_bottom = input->height + search_margin;
 
         // Get the offset between origins
         A_long offsetX = input->origin_x - output->origin_x;
         A_long offsetY = input->origin_y - output->origin_y;
 
-        // Generate the distance field
-        std::vector<float> distanceField;
-        if (PF_WORLD_IS_DEEP(input)) {
+        if (PF_WORLD_IS_DEEP(output)) {
+            // 16-bit processing
             A_u_short threshold16 = threshold * 257;
-            ERR(GenerateDistanceField(input, threshold, threshold16, direction, distanceField,
-                output->width, output->height, offsetX, offsetY));
-        }
-        else {
-            ERR(GenerateDistanceField(input, threshold, 0, direction, distanceField,
-                output->width, output->height, offsetX, offsetY));
-        }
+            PF_Pixel16 edge_color;
 
-        if (!err && !distanceField.empty()) {
-            // ==========================================
-            // STEP 4: Draw the border with anti-aliasing using the distance field
-            // ==========================================
+            edge_color.alpha = PF_MAX_CHAN16;
+            edge_color.red = PF_BYTE_TO_CHAR(color.red);
+            edge_color.green = PF_BYTE_TO_CHAR(color.green);
+            edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            // Calculate effective thickness based on direction
-            float effectiveThickness = thicknessFloat;
-            if (direction == DIRECTION_BOTH) {
-                effectiveThickness = thicknessFloat / 2.0f;
-            }
+            // Loop through the extended search area in input coordinates
+            for (A_long y = search_top; y < search_bottom; y++) {
+                for (A_long x = search_left; x < search_right; x++) {
+                    // Check if this is a border pixel in input coordinates
+                    if (IsEdgePixel16(input, x, y, threshold16, thicknessInt, direction)) {
+                        // Convert to output coordinates
+                        A_long outX = x + offsetX;
+                        A_long outY = y + offsetY;
 
-            // Define the border width for anti-aliasing
-            float edgeWidth = MIN(2.0f, MAX(0.5f, thicknessFloat / 50.0f));
-            float innerEdge = MAX(0.0f, effectiveThickness - edgeWidth);
-            float outerEdge = effectiveThickness;
-
-            if (PF_WORLD_IS_DEEP(output)) {
-                // 16-bit processing
-                PF_Pixel16 edge_color;
-                edge_color.alpha = PF_MAX_CHAN16;
-                edge_color.red = PF_BYTE_TO_CHAR(color.red);
-                edge_color.green = PF_BYTE_TO_CHAR(color.green);
-                edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
-
-                // Process the output buffer
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-                for (A_long y = 0; y < output->height; y++) {
-                    for (A_long x = 0; x < output->width; x++) {
-                        // Get distance from distance field
-                        float distance = distanceField[y * output->width + x];
-
-                        // Skip if no edge influence
-                        if (distance < 0.0f) continue;
-
-                        // Calculate edge intensity using smooth falloff
-                        float edgeIntensity = 0.0f;
-
-                        if (distance <= innerEdge) {
-                            edgeIntensity = 1.0f; // Fully inside the border
-                        }
-                        else if (distance < outerEdge) {
-                            // Smooth transition between inner and outer edge
-                            float t = (distance - innerEdge) / (outerEdge - innerEdge);
-                            // Smoothstep function: 3t² - 2t³
-                            t = t * t * (3.0f - 2.0f * t);
-                            edgeIntensity = 1.0f - t;
-                        }
-
-                        // Skip if no intensity
-                        if (edgeIntensity <= 0.0f) continue;
-
-                        // Get output pixel
-                        PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-
-                        // Apply anti-aliasing using alpha blending
-                        if (showLineOnly) {
-                            // For "show line only" mode, just set the pixel with correct opacity
-                            outData[x].red = edge_color.red;
-                            outData[x].green = edge_color.green;
-                            outData[x].blue = edge_color.blue;
-                            outData[x].alpha = (A_u_short)(edgeIntensity * PF_MAX_CHAN16);
-                        }
-                        else {
-                            // For normal mode, blend with existing pixel
-                            PF_Pixel16 blendedPixel = outData[x];
-                            float edgeAlpha = edgeIntensity;
-                            float existingAlpha = (float)blendedPixel.alpha / PF_MAX_CHAN16;
-                            float resultAlpha = edgeAlpha + existingAlpha * (1.0f - edgeAlpha);
-
-                            if (resultAlpha > 0.0f) {
-                                // Blend colors
-                                float blend = edgeAlpha / resultAlpha;
-                                blendedPixel.red = (A_u_short)(edge_color.red * blend + blendedPixel.red * (1.0f - blend));
-                                blendedPixel.green = (A_u_short)(edge_color.green * blend + blendedPixel.green * (1.0f - blend));
-                                blendedPixel.blue = (A_u_short)(edge_color.blue * blend + blendedPixel.blue * (1.0f - blend));
-                                blendedPixel.alpha = (A_u_short)(resultAlpha * PF_MAX_CHAN16);
-
-                                // Update pixel
-                                outData[x] = blendedPixel;
-                            }
+                        // Check if within output bounds
+                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
+                            // Draw the border pixel
+                            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+                            outData[outX] = edge_color;
                         }
                     }
                 }
             }
-            else {
-                // 8-bit processing
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-                for (A_long y = 0; y < output->height; y++) {
-                    for (A_long x = 0; x < output->width; x++) {
-                        // Get distance from distance field
-                        float distance = distanceField[y * output->width + x];
+        }
+        else {
+            // 8-bit processing
+            for (A_long y = search_top; y < search_bottom; y++) {
+                for (A_long x = search_left; x < search_right; x++) {
+                    // Check if this is a border pixel in input coordinates
+                    if (IsEdgePixel8(input, x, y, threshold, thicknessInt, direction)) {
+                        // Convert to output coordinates
+                        A_long outX = x + offsetX;
+                        A_long outY = y + offsetY;
 
-                        // Skip if no edge influence
-                        if (distance < 0.0f) continue;
-
-                        // Calculate edge intensity using smooth falloff
-                        float edgeIntensity = 0.0f;
-
-                        if (distance <= innerEdge) {
-                            edgeIntensity = 1.0f; // Fully inside the border
-                        }
-                        else if (distance < outerEdge) {
-                            // Smooth transition between inner and outer edge
-                            float t = (distance - innerEdge) / (outerEdge - innerEdge);
-                            // Smoothstep function: 3t² - 2t³
-                            t = t * t * (3.0f - 2.0f * t);
-                            edgeIntensity = 1.0f - t;
-                        }
-
-                        // Skip if no intensity
-                        if (edgeIntensity <= 0.0f) continue;
-
-                        // Get output pixel
-                        PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-
-                        // Apply anti-aliasing using alpha blending
-                        if (showLineOnly) {
-                            // For "show line only" mode, just set the pixel with correct opacity
-                            outData[x].red = color.red;
-                            outData[x].green = color.green;
-                            outData[x].blue = color.blue;
-                            outData[x].alpha = (A_u_char)(edgeIntensity * PF_MAX_CHAN8);
-                        }
-                        else {
-                            // For normal mode, blend with existing pixel
-                            PF_Pixel8 blendedPixel = outData[x];
-                            float edgeAlpha = edgeIntensity;
-                            float existingAlpha = (float)blendedPixel.alpha / PF_MAX_CHAN8;
-                            float resultAlpha = edgeAlpha + existingAlpha * (1.0f - edgeAlpha);
-
-                            if (resultAlpha > 0.0f) {
-                                // Blend colors
-                                float blend = edgeAlpha / resultAlpha;
-                                blendedPixel.red = (A_u_char)(color.red * blend + blendedPixel.red * (1.0f - blend));
-                                blendedPixel.green = (A_u_char)(color.green * blend + blendedPixel.green * (1.0f - blend));
-                                blendedPixel.blue = (A_u_char)(color.blue * blend + blendedPixel.blue * (1.0f - blend));
-                                blendedPixel.alpha = (A_u_char)(resultAlpha * PF_MAX_CHAN8);
-
-                                // Update pixel
-                                outData[x] = blendedPixel;
-                            }
+                        // Check if within output bounds
+                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
+                            // Draw the border pixel
+                            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
+                            outData[outX].alpha = PF_MAX_CHAN8;
+                            outData[outX].red = color.red;
+                            outData[outX].green = color.green;
+                            outData[outX].blue = color.blue;
                         }
                     }
                 }
