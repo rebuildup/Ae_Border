@@ -1,24 +1,3 @@
-/*******************************************************************/
-/*                                                                 */
-/*                      ADOBE CONFIDENTIAL                         */
-/*                   _ _ _ _ _ _ _ _ _ _ _ _                     */
-/*                                                                 */
-/* Copyright 2007-2023 Adobe Inc.                                  */
-/* All Rights Reserved.                                            */
-/*                                                                 */
-/* NOTICE:  All information contained herein is, and remains the   */
-/* property of Adobe Inc. and its suppliers, if                    */
-/* any.  The intellectual and technical concepts contained         */
-/* herein are proprietary to Adobe Inc. and its                    */
-/* suppliers and may be covered by U.S. and Foreign Patents,       */
-/* patents in process, and are protected by trade secret or        */
-/* copyright law.  Dissemination of this information or            */
-/* reproduction of this material is strictly forbidden unless      */
-/* prior written permission is obtained from Adobe Inc.            */
-/* Incorporated.                                                   */
-/*                                                                 */
-/*******************************************************************/
-
 /*
     Border.h
 */
@@ -68,7 +47,6 @@ typedef unsigned short PixelType;
 
 /* Parameter defaults */
 
-// Change back to floating point
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
 #define BORDER_THICKNESS_DFLT    1.0
@@ -79,9 +57,9 @@ typedef unsigned short PixelType;
 
 // Direction options
 enum {
-    DIRECTION_BOTH = 1,     // Default
-    DIRECTION_INSIDE,       // 2
-    DIRECTION_OUTSIDE       // 3
+    DIRECTION_BOTH = 1,
+    DIRECTION_INSIDE,
+    DIRECTION_OUTSIDE
 };
 
 #define BORDER_DIRECTION_DFLT    DIRECTION_BOTH
@@ -95,7 +73,7 @@ enum {
     BORDER_THICKNESS,
     BORDER_COLOR,
     BORDER_THRESHOLD,
-    BORDER_DIRECTION,        
+    BORDER_DIRECTION,
     BORDER_SHOW_LINE_ONLY,
     BORDER_NUM_PARAMS
 };
@@ -104,12 +82,12 @@ enum {
     THICKNESS_DISK_ID = 1,
     COLOR_DISK_ID,
     THRESHOLD_DISK_ID,
-    DIRECTION_DISK_ID,     
+    DIRECTION_DISK_ID,
     SHOW_LINE_ONLY_DISK_ID
 };
 
 typedef struct BorderInfo {
-    A_long      thickness;    
+    A_long      thickness;
     PF_Pixel    color;
     A_u_char    threshold;
     A_long      direction;
