@@ -543,7 +543,6 @@ GenerateDistanceField(
 
     return err;
 }
-
 static PF_Err
 PreRender(
     PF_InData* in_data,
@@ -595,25 +594,26 @@ PreRender(
         effectiveThickness = pixelThickness / 2.0f;
     }
 
-    // Apply resolution factor - divide by resolution factor
-    // Add a very generous margin to ensure border is fully displayed
-    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 50;
+    // Apply resolution factor with more reasonable margin
+    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 5;
 
     // Store input checkout ID
-    extra->output->pre_render_data = (void*)BORDER_INPUT;
+    extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
 
-    // Set expanded output rects
+    PF_Rect request_rect = req.rect;
+
     extra->output->result_rect = in_result.result_rect;
-    extra->output->result_rect.left -= borderExpansion;
-    extra->output->result_rect.top -= borderExpansion;
-    extra->output->result_rect.right += borderExpansion;
-    extra->output->result_rect.bottom += borderExpansion;
+
+    extra->output->result_rect.left = MAX(request_rect.left, in_result.result_rect.left - borderExpansion);
+    extra->output->result_rect.top = MAX(request_rect.top, in_result.result_rect.top - borderExpansion);
+    extra->output->result_rect.right = MIN(request_rect.right, in_result.result_rect.right + borderExpansion);
+    extra->output->result_rect.bottom = MIN(request_rect.bottom, in_result.result_rect.bottom + borderExpansion);
 
     extra->output->max_result_rect = in_result.max_result_rect;
-    extra->output->max_result_rect.left -= borderExpansion;
-    extra->output->max_result_rect.top -= borderExpansion;
-    extra->output->max_result_rect.right += borderExpansion;
-    extra->output->max_result_rect.bottom += borderExpansion;
+    extra->output->max_result_rect.left = MAX(request_rect.left, in_result.max_result_rect.left - borderExpansion);
+    extra->output->max_result_rect.top = MAX(request_rect.top, in_result.max_result_rect.top - borderExpansion);
+    extra->output->max_result_rect.right = MIN(request_rect.right, in_result.max_result_rect.right + borderExpansion);
+    extra->output->max_result_rect.bottom = MIN(request_rect.bottom, in_result.max_result_rect.bottom + borderExpansion);
 
     // Clean up
     PF_CHECKIN_PARAM(in_data, &thickness_param);
@@ -631,7 +631,7 @@ SmartRender(
     AEGP_SuiteHandler suites(in_data->pica_basicP);
 
     // Get input checkout ID
-    A_long checkout_id = (A_long)extra->input->pre_render_data;
+    A_long checkout_id = (A_long)(intptr_t)extra->input->pre_render_data;
 
     // Get input and output
     PF_EffectWorld* input = NULL;
