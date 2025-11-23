@@ -765,8 +765,8 @@ PF_Err PluginDataEntryFunction2(
         inPtr,
         inPluginDataCallBackPtr,
         "Border",
-        "ADBE Border",
-        "Border",
+        "361do Border",
+        "361do_plugins",
         AE_RESERVED_INFO,
         "EffectMain",
         "https://github.com/rebuildup/Ae_Border");

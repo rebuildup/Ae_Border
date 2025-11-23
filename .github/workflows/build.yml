@@ -1,0 +1,687 @@
+name: Build After Effects Plugin
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Check required secrets
+        id: check
+        shell: bash
+        env:
+          AE_SDK_DOWNLOAD_TOKEN: ${{ secrets.AE_SDK_DOWNLOAD_TOKEN }}
+        run: |
+          if [ -n "$AE_SDK_DOWNLOAD_TOKEN" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "AE_SDK_DOWNLOAD_TOKEN: present"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AE_SDK_DOWNLOAD_TOKEN is not configured. Build will be skipped."
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: preflight
+    if: needs.preflight.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: mac
+            sdk_file: AfterEffectsSDK_25.6_61_mac.zip
+          - os: windows-latest
+            platform: win
+            sdk_file: AfterEffectsSDK_25.6_61_win.zip
+    
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Xcode (Mac)
+        if: matrix.platform == 'mac'
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.2'
+
+      - name: Accept Xcode license (Mac)
+        if: matrix.platform == 'mac'
+        run: sudo xcodebuild -license accept
+
+      - name: Set up MSBuild (Windows)
+        if: matrix.platform == 'win'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Set up MSVC Developer Command Prompt (Windows)
+        if: matrix.platform == 'win'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download After Effects SDK (Mac)
+        if: matrix.platform == 'mac'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AE_SDK_DOWNLOAD_TOKEN }}
+        run: |
+          set -e
+          
+          REPO="rebuildup/my-ae-sdk-storage"
+          RELEASE_TAG_CANDIDATES=("sdk" "ae-sdk_25.6_61" "v25.6.61" "25.6.61")
+          
+          echo "Downloading After Effects SDK from private repository..."
+          
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "Error: GITHUB_TOKEN not configured"
+            exit 1
+          fi
+          
+          RELEASE_JSON=""
+          for RELEASE_TAG in "${RELEASE_TAG_CANDIDATES[@]}"; do
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG" 2>&1)
+            
+            HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+            RELEASE_JSON=$(echo "$RESPONSE" | sed '/HTTP_STATUS:/d')
+            
+            if [ "$HTTP_STATUS" == "200" ]; then
+              echo "Found release: $RELEASE_TAG"
+              break
+            fi
+          done
+          
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Error: Failed to fetch release information"
+            exit 1
+          fi
+          
+          ASSET_NAME="${{ matrix.sdk_file }}"
+          ASSET_JSON=$(echo "$RELEASE_JSON" | jq -c --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name)' | head -1)
+
+          if [ -z "$ASSET_JSON" ]; then
+            echo "Error: SDK file not found: $ASSET_NAME"
+            exit 1
+          fi
+
+          API_DOWNLOAD_URL=$(echo "$ASSET_JSON" | jq -r '.url // empty')
+          
+          echo "Downloading SDK..."
+          curl -L \
+               -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/octet-stream" \
+               -o AE_SDK.zip \
+            -s "$API_DOWNLOAD_URL"
+          
+          if [ ! -f "AE_SDK.zip" ] || [ ! -s "AE_SDK.zip" ]; then
+            echo "Error: Download failed"
+            exit 1
+          fi
+          
+          echo "SDK downloaded successfully ($(du -h AE_SDK.zip | cut -f1))"
+
+      - name: Download After Effects SDK (Windows)
+        if: matrix.platform == 'win'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AE_SDK_DOWNLOAD_TOKEN }}
+        shell: pwsh
+        run: |
+          $repo = "rebuildup/my-ae-sdk-storage"
+          $releaseTags = @("sdk", "ae-sdk_25.6_61", "v25.6.61", "25.6.61")
+          
+          Write-Host "Downloading After Effects SDK from private repository..."
+          
+          if (-not $env:GITHUB_TOKEN) {
+            Write-Host "Error: GITHUB_TOKEN not configured"
+            exit 1
+          }
+          
+          $releaseJson = $null
+          foreach ($tag in $releaseTags) {
+            try {
+              $headers = @{
+                "Authorization" = "token $env:GITHUB_TOKEN"
+                "Accept" = "application/vnd.github.v3+json"
+              }
+              
+              $releaseJson = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $headers -ErrorAction Stop
+              Write-Host "Found release: $tag"
+              break
+            } catch {
+              continue
+            }
+          }
+          
+          if (-not $releaseJson) {
+            Write-Host "Error: Failed to fetch release information"
+              exit 1
+          }
+          
+          $assetName = "${{ matrix.sdk_file }}"
+          $asset = $releaseJson.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
+
+          if (-not $asset) {
+            Write-Host "Exact asset not found: $assetName"
+            Write-Host "Available assets:"
+            $releaseJson.assets | ForEach-Object { Write-Host " - " $_.name }
+
+            # Fallback: pick first Windows-looking ZIP asset
+            $asset = $releaseJson.assets | Where-Object {
+              $_.name -match '(?i)win.*\\.zip$'
+            } | Select-Object -First 1
+
+            if ($asset) {
+              Write-Host "Fallback asset selected: $($asset.name)"
+            }
+          }
+          
+          if (-not $asset) {
+            Write-Host "Error: SDK file not found: $assetName"
+            exit 1
+          }
+          
+          Write-Host "Downloading SDK..."
+          $headers = @{
+            "Authorization" = "token $env:GITHUB_TOKEN"
+            "Accept" = "application/octet-stream"
+          }
+          
+          Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile "AE_SDK.zip" -MaximumRedirection 5
+          
+          if (-not (Test-Path "AE_SDK.zip")) {
+            Write-Host "Error: Download failed"
+            exit 1
+          }
+          
+          Write-Host "SDK downloaded successfully"
+
+      - name: Extract and Setup SDK (Mac)
+        if: matrix.platform == 'mac'
+        run: |
+          set +e
+          
+          echo "Extracting SDK..."
+          
+          mkdir -p ae_sdk_work
+          cd ae_sdk_work
+          unzip -q ../AE_SDK.zip
+          
+          SDK_EXTRACT_DIR=$(find . -maxdepth 2 -type f -name "extractzstd.sh" -exec dirname {} \; | head -1)
+          
+          if [ -z "$SDK_EXTRACT_DIR" ]; then
+            echo "Error: extractzstd.sh not found"
+            find . -name "*.sh"
+            exit 1
+          fi
+          
+          cd "$SDK_EXTRACT_DIR"
+          chmod +x zstd extractzstd.sh
+          
+          echo "Running SDK extraction script..."
+          set +e
+          ./extractzstd.sh 2>&1 | head -50
+          EXTRACT_EXIT=$?
+          set -e
+          
+          if [ $EXTRACT_EXIT -ne 0 ]; then
+            echo "Warning: extractzstd.sh exited with code $EXTRACT_EXIT (continuing...)"
+          fi
+          
+          sleep 2
+          
+          if [ -d "ae25.6_61.64bit.AfterEffectsSDK" ]; then
+            echo "SDK extracted successfully"
+          else
+            echo "SDK directory not found, attempting manual extraction..."
+            
+            if [ ! -f "zstd" ] || [ ! -f "ae25.6_61.64bit.AfterEffectsSDK.tar.zstd.zip" ]; then
+              echo "Error: Required files not found"
+              ls -la
+              exit 1
+            fi
+            
+            echo "Running zstd extraction..."
+            set +e
+            ./zstd -cd ae25.6_61.64bit.AfterEffectsSDK.tar.zstd.zip | tar xf - -C . 2>&1 | head -50
+            ZSTD_EXIT=$?
+            set -e
+            
+            if [ $ZSTD_EXIT -ne 0 ]; then
+              echo "Error: zstd extraction failed (exit code: $ZSTD_EXIT)"
+              exit 1
+            fi
+            
+            sleep 2
+            if [ -d "ae25.6_61.64bit.AfterEffectsSDK" ]; then
+              echo "SDK extraction completed"
+            else
+              echo "Error: SDK extraction failed"
+              ls -la
+              exit 1
+            fi
+          fi
+          
+          # Find SDK root (Headers/Util/Resources location)
+          SDK_ROOT=""
+          
+          shopt -s nullglob
+          for dir in ae*.AfterEffectsSDK; do
+            if [ -d "$dir/Examples/Headers" ] && [ -d "$dir/Examples/Util" ] && [ -d "$dir/Examples/Resources" ]; then
+              SDK_ROOT=$(cd "$dir/Examples" && pwd)
+              echo "SDK root found (Examples): $SDK_ROOT"
+              break
+            elif [ -d "$dir/Headers" ] && [ -d "$dir/Util" ] && [ -d "$dir/Resources" ]; then
+              SDK_ROOT=$(cd "$dir" && pwd)
+              echo "SDK root found (direct): $SDK_ROOT"
+              break
+            fi
+          done
+          shopt -u nullglob
+          
+          if [ -z "$SDK_ROOT" ]; then
+            echo "Searching for Headers directory..."
+            while IFS= read -r -d '' dir; do
+              parent=$(dirname "$dir")
+              if [ -d "$parent/Util" ] && [ -d "$parent/Resources" ]; then
+                SDK_ROOT=$(cd "$parent" && pwd)
+                echo "SDK root found: $SDK_ROOT"
+                break
+              fi
+            done < <(find . -maxdepth 3 -type d -name "Headers" -print0 2>/dev/null)
+          fi
+          
+          if [ -z "$SDK_ROOT" ]; then
+            echo "Error: SDK root not found"
+            find . -maxdepth 3 -type d
+            exit 1
+          fi
+          
+          echo "SDK root: $SDK_ROOT"
+          
+          mkdir -p "$SDK_ROOT/Template"
+          echo "SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          rm -f ../../AE_SDK.zip 2>/dev/null || true
+          set -e
+
+      - name: Extract and Setup SDK (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Write-Host "Extracting SDK..."
+          
+          New-Item -ItemType Directory -Path "ae_sdk_work" -Force | Out-Null
+          Set-Location "ae_sdk_work"
+          Expand-Archive -Path "..\AE_SDK.zip" -DestinationPath "." -Force
+          
+          $extractScript = Get-ChildItem -Recurse -Filter "extractzstd.bat" | Select-Object -First 1
+          
+          if (-not $extractScript) {
+            Write-Host "Error: extractzstd.bat not found"
+            Get-ChildItem -Recurse -Filter "*.bat"
+            exit 1
+          }
+          
+          Set-Location $extractScript.DirectoryName
+          
+          Write-Host "Running SDK extraction script..."
+          cmd /c extractzstd.bat
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Warning: extractzstd.bat exited with code $LASTEXITCODE (continuing...)"
+          }
+          
+          # Find SDK root (Headers/Util/Resources location)
+          $sdkRoot = $null
+          
+          $sdkDirs = Get-ChildItem -Directory -Filter "ae*.AfterEffectsSDK" -ErrorAction SilentlyContinue
+          foreach ($dir in $sdkDirs) {
+            $examplesPath = Join-Path $dir.FullName "Examples"
+            if ((Test-Path "$examplesPath\Headers") -and 
+                (Test-Path "$examplesPath\Util") -and 
+                (Test-Path "$examplesPath\Resources")) {
+              $sdkRoot = $examplesPath
+              Write-Host "SDK root found (Examples): $sdkRoot"
+              break
+            }
+            elseif ((Test-Path "$($dir.FullName)\Headers") -and 
+                    (Test-Path "$($dir.FullName)\Util") -and 
+                    (Test-Path "$($dir.FullName)\Resources")) {
+              $sdkRoot = $dir.FullName
+              Write-Host "SDK root found (direct): $sdkRoot"
+              break
+            }
+          }
+          
+          if (-not $sdkRoot) {
+            Write-Host "Searching for Headers directory..."
+            $headersDirs = Get-ChildItem -Directory -Recurse -Depth 3 -Filter "Headers" -ErrorAction SilentlyContinue
+            foreach ($dir in $headersDirs) {
+              $parent = $dir.Parent.FullName
+              if ((Test-Path "$parent\Util") -and (Test-Path "$parent\Resources")) {
+                $sdkRoot = $parent
+                Write-Host "SDK root found: $sdkRoot"
+                break
+              }
+            }
+          }
+          
+          if (-not $sdkRoot) {
+            Write-Host "Error: SDK root not found"
+            Get-ChildItem -Directory -Depth 2 | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+          
+          Write-Host "SDK root: $sdkRoot"
+          
+          New-Item -ItemType Directory -Path "$sdkRoot\Template" -Force | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "SDK_ROOT=$sdkRoot"
+          Remove-Item "..\AE_SDK.zip" -Force -ErrorAction SilentlyContinue
+
+      - name: Build SDK Dependencies (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $pluginBuildDir = "${{ github.workspace }}\ae_plugin_output"
+          New-Item -ItemType Directory -Path $pluginBuildDir -Force | Out-Null
+          $env:AE_PLUGIN_BUILD_DIR = $pluginBuildDir
+          
+          $sdkParent = Split-Path $env:SDK_ROOT -Parent
+          Set-Location $sdkParent
+          
+          $buildSln = $null
+          
+          if (Test-Path "BuildAll.sln") {
+            $buildSln = "BuildAll.sln"
+          } elseif (Test-Path "Examples\BuildAll.sln") {
+            Set-Location Examples
+            $buildSln = "BuildAll.sln"
+          }
+          
+          if ($buildSln) {
+            Write-Host "Building SDK dependencies ($buildSln)..."
+            Write-Host "Note: This may fail without admin rights"
+            
+            $buildSuccess = $false
+            try {
+              msbuild $buildSln `
+                /p:Configuration=Debug `
+                /p:Platform=x64 `
+                /t:Build `
+                /v:minimal `
+                /m:1 `
+                /nologo `
+                /maxcpucount:1 2>&1 | Out-Null
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "SDK dependencies built successfully"
+                $buildSuccess = $true
+              }
+            } catch {
+              # Silently ignore build errors
+            }
+            
+            if (-not $buildSuccess) {
+              Write-Host "SDK dependencies build skipped (not required for plugin build)"
+            }
+          } else {
+            Write-Host "BuildAll.sln not found (not required for plugin build)"
+          }
+          
+          # Always succeed this step
+          exit 0
+
+      - name: Copy plugin to SDK Template directory (Mac)
+        if: matrix.platform == 'mac'
+        run: |
+          echo "Copying plugin to SDK Template directory..."
+          
+          PLUGIN_DIR="$SDK_ROOT/Template/Border"
+          mkdir -p "$PLUGIN_DIR"
+          
+          rsync -av \
+            --exclude='.git' \
+            --exclude='tmp' \
+            --exclude='ae_sdk_work' \
+            --exclude='.github' \
+            --exclude='output' \
+            --exclude='AE_SDK.zip' \
+            "${{ github.workspace }}/" \
+            "$PLUGIN_DIR/"
+          
+          echo "Plugin copied to: $PLUGIN_DIR"
+          echo "PLUGIN_DIR=$PLUGIN_DIR" >> $GITHUB_ENV
+
+      - name: Copy plugin to SDK Template directory (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Write-Host "Copying plugin to SDK Template directory..."
+          
+          $pluginDir = "$env:SDK_ROOT\Template\Border"
+          New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
+          
+          $excludeDirs = @('.git', 'tmp', 'ae_sdk_work', '.github', 'output')
+          
+          Get-ChildItem "${{ github.workspace }}" -Force | Where-Object {
+            $_.Name -notin $excludeDirs -and $_.Name -ne 'AE_SDK.zip'
+          } | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $pluginDir -Recurse -Force
+          }
+          
+          Write-Host "Plugin copied to: $pluginDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "PLUGIN_DIR=$pluginDir"
+
+      - name: Build Plugin (Mac)
+        if: matrix.platform == 'mac'
+        run: |
+          set -e
+          
+          echo "Building plugin..."
+          
+          PLUGIN_BUILD_DIR="${{ github.workspace }}/ae_plugin_output"
+          mkdir -p "$PLUGIN_BUILD_DIR"
+          export AE_PLUGIN_BUILD_DIR="$PLUGIN_BUILD_DIR"
+          
+          cd "$PLUGIN_DIR/Mac"
+          
+          if [ ! -f "Border.xcodeproj/project.pbxproj" ]; then
+            echo "Error: Xcode project not found"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Build configuration:"
+          echo "  Configuration: Debug"
+          echo "  SDK: macosx"
+          echo "  Architectures: x86_64, arm64"
+          echo "  Plugin directory: $PLUGIN_DIR"
+          echo "  Current directory: $(pwd)"
+          
+          # Build with detailed output
+          echo "Starting xcodebuild..."
+          BUILD_LOG="${{ github.workspace }}/xcodebuild.log"
+          
+          set +e
+          xcodebuild build \
+            -project Border.xcodeproj \
+            -target Border \
+            -configuration Debug \
+            -sdk macosx \
+            -arch x86_64 \
+            -arch arm64 \
+            -destination 'platform=macOS' \
+            CONFIGURATION_BUILD_DIR="$(pwd)/build" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$BUILD_LOG"
+          BUILD_EXIT_CODE=$?
+          set -e
+          
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "::error::xcodebuild failed with exit code $BUILD_EXIT_CODE"
+            echo "Last 100 lines of build log:"
+            tail -100 "$BUILD_LOG" || true
+            echo "Full build log saved to: $BUILD_LOG"
+            exit 1
+          fi
+          
+          echo "Build successful"
+          
+          # Find build artifact
+          echo "Searching for build artifact..."
+          PLUGIN_PATH=""
+          
+          for search_path in "build/Border.plugin" "build/Debug/Border.plugin" "build/Release/Border.plugin"; do
+            if [ -d "$search_path" ]; then
+              PLUGIN_PATH="$search_path"
+              break
+            fi
+          done
+          
+          if [ -z "$PLUGIN_PATH" ]; then
+            PLUGIN_PATH=$(find build -name "Border.plugin" -type d 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$PLUGIN_PATH" ]; then
+            mkdir -p "${{ github.workspace }}/artifacts"
+            cp -R "$PLUGIN_PATH" "${{ github.workspace }}/artifacts/"
+            echo "Artifact copied: artifacts/Border.plugin"
+          else
+            echo "::error::Build artifact not found"
+            echo "Build directory contents:"
+            find build -type f -o -type d | head -30 || true
+            echo "Searching for any .plugin files:"
+            find . -name "*.plugin" -o -name "*.o" | head -20 || true
+            exit 1
+          fi
+          
+      - name: Build Plugin (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Write-Host "Building plugin..."
+          
+          $pluginBuildDir = "${{ github.workspace }}\ae_plugin_output"
+          New-Item -ItemType Directory -Path $pluginBuildDir -Force | Out-Null
+          $env:AE_PLUGIN_BUILD_DIR = $pluginBuildDir
+          
+          Set-Location "$env:PLUGIN_DIR\Win"
+          
+          if (-not (Test-Path "Border.sln")) {
+            Write-Host "Error: Solution file not found"
+            Get-ChildItem
+            exit 1
+          }
+          
+          $outputDir = Join-Path (Get-Location).Path "..\output"
+          New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+          
+          Write-Host "Build configuration:"
+          Write-Host "  Configuration: Release"
+          Write-Host "  Platform: x64"
+          
+          msbuild Border.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /t:Build `
+            /v:normal `
+            /m `
+            /nologo
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host ""
+            Write-Host "Error: Build failed (exit code: $LASTEXITCODE)"
+            Write-Host ""
+            Write-Host "Checking SDK structure:"
+            Write-Host "  SDK Root: $env:SDK_ROOT"
+            Write-Host "  Headers: $(Test-Path "$env:SDK_ROOT\Headers")"
+            Write-Host "  Util: $(Test-Path "$env:SDK_ROOT\Util")"
+            Write-Host "  PiPLTool: $(Test-Path "$env:SDK_ROOT\Resources\PiPLTool.exe")"
+            exit 1
+          }
+          
+          Write-Host "Build successful"
+          
+          # Find build artifact
+          Write-Host "Searching for build artifact..."
+          
+          $searchPaths = @(
+            "x64\Release\Border.aex",
+            "..\output\Border.aex",
+            "Release\Border.aex",
+            ".\Border.aex"
+          )
+          
+          $aexPath = $null
+          foreach ($path in $searchPaths) {
+            if (Test-Path $path) {
+              $aexPath = Get-Item $path
+              break
+            }
+          }
+          
+          if (-not $aexPath) {
+            $aexPath = Get-ChildItem -Path . -Filter "Border.aex" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          
+          if ($aexPath) {
+            $artifactsDir = "${{ github.workspace }}\artifacts"
+            New-Item -ItemType Directory -Path $artifactsDir -Force | Out-Null
+            Copy-Item -Path $aexPath.FullName -Destination $artifactsDir -Force
+            Write-Host "Artifact copied: $artifactsDir\Border.aex"
+          } else {
+            Write-Host "Error: Build artifact not found"
+            Get-ChildItem -Recurse -Depth 3 | Where-Object { $_.Extension -eq ".aex" -or $_.Name -like "*.obj" } | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+      - name: Verify exported entry points (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $dumpbinCmd = Get-Command dumpbin -ErrorAction SilentlyContinue
+          if (-not $dumpbinCmd) {
+            Write-Host "::error::dumpbin not available in PATH"
+            exit 1
+          }
+          $dumpbinPath = $dumpbinCmd.Source
+          $artifactPath = Join-Path "${{ github.workspace }}" "artifacts\Border.aex"
+          if (-not (Test-Path $artifactPath)) {
+            Write-Host "::error::Artifact not found at $artifactPath"
+            exit 1
+          }
+          Write-Host "Running dumpbin on $artifactPath"
+          $dumpbinOutput = & $dumpbinPath /EXPORTS $artifactPath 2>&1
+          $dumpbinOutput | ForEach-Object { Write-Host $_ }
+          $hasEffectMain = $dumpbinOutput -match '\bEffectMain\b'
+          $hasPluginData = $dumpbinOutput -match '\bPluginDataEntryFunction2\b'
+          if (-not $hasEffectMain -or -not $hasPluginData) {
+            Write-Host "::error::Required exports not found in Border.aex"
+            exit 1
+          }
+          Write-Host "✓ Verified exports: EffectMain, PluginDataEntryFunction2"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Border-${{ matrix.platform }}
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+
