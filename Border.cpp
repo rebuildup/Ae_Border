@@ -682,7 +682,7 @@ SmartRender(
             }
         }
 
-        // STEP 3: Draw the border with anti-aliasing
+        // STEP 3: Draw the border (fast version without anti-aliasing)
         A_long search_margin = thicknessInt + 5;
         A_long search_left = -search_margin;
         A_long search_top = -search_margin;
@@ -692,9 +692,6 @@ SmartRender(
         A_long offsetX = input->origin_x - output->origin_x;
         A_long offsetY = input->origin_y - output->origin_y;
 
-        // Anti-aliasing: blend at the edge (0.5 pixel smooth transition)
-        const float aaRange = 0.7f;
-        
         if (PF_WORLD_IS_DEEP(output)) {
             A_u_short threshold16 = threshold * 257;
             PF_Pixel16 edge_color;
@@ -711,37 +708,9 @@ SmartRender(
 
                     if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
 
-                    // Sample with sub-pixel accuracy for anti-aliasing
-                    float coverage = 0.0f;
-                    const int samples = 3;  // 3x3 supersampling
-                    const float step = 1.0f / samples;
-                    
-                    for (int sy = 0; sy < samples; sy++) {
-                        for (int sx = 0; sx < samples; sx++) {
-                            float sampleX = x + (sx - samples/2) * step;
-                            float sampleY = y + (sy - samples/2) * step;
-                            A_long isx = (A_long)(sampleX + 0.5f);
-                            A_long isy = (A_long)(sampleY + 0.5f);
-                            
-                            if (IsEdgePixel16(input, isx, isy, threshold16, thicknessInt, direction)) {
-                                coverage += 1.0f / (samples * samples);
-                            }
-                        }
-                    }
-
-                    if (coverage > 0.01f) {
+                    if (IsEdgePixel16(input, x, y, threshold16, thicknessInt, direction)) {
                         PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-                        if (coverage >= 0.99f) {
-                            outData[outX] = edge_color;
-                        } else {
-                            // Alpha blend with background
-                            PF_Pixel16 bg = outData[outX];
-                            A_u_short alpha = (A_u_short)(coverage * PF_MAX_CHAN16);
-                            outData[outX].alpha = MAX((A_u_short)((alpha * edge_color.alpha + (PF_MAX_CHAN16 - alpha) * bg.alpha) / PF_MAX_CHAN16), bg.alpha);
-                            outData[outX].red = (A_u_short)((alpha * edge_color.red + (PF_MAX_CHAN16 - alpha) * bg.red) / PF_MAX_CHAN16);
-                            outData[outX].green = (A_u_short)((alpha * edge_color.green + (PF_MAX_CHAN16 - alpha) * bg.green) / PF_MAX_CHAN16);
-                            outData[outX].blue = (A_u_short)((alpha * edge_color.blue + (PF_MAX_CHAN16 - alpha) * bg.blue) / PF_MAX_CHAN16);
-                        }
+                        outData[outX] = edge_color;
                     }
                 }
             }
@@ -754,40 +723,12 @@ SmartRender(
 
                     if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
 
-                    // Sample with sub-pixel accuracy for anti-aliasing
-                    float coverage = 0.0f;
-                    const int samples = 3;  // 3x3 supersampling
-                    const float step = 1.0f / samples;
-                    
-                    for (int sy = 0; sy < samples; sy++) {
-                        for (int sx = 0; sx < samples; sx++) {
-                            float sampleX = x + (sx - samples/2) * step;
-                            float sampleY = y + (sy - samples/2) * step;
-                            A_long isx = (A_long)(sampleX + 0.5f);
-                            A_long isy = (A_long)(sampleY + 0.5f);
-                            
-                            if (IsEdgePixel8(input, isx, isy, threshold, thicknessInt, direction)) {
-                                coverage += 1.0f / (samples * samples);
-                            }
-                        }
-                    }
-
-                    if (coverage > 0.01f) {
+                    if (IsEdgePixel8(input, x, y, threshold, thicknessInt, direction)) {
                         PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-                        if (coverage >= 0.99f) {
-                            outData[outX].alpha = PF_MAX_CHAN8;
-                            outData[outX].red = color.red;
-                            outData[outX].green = color.green;
-                            outData[outX].blue = color.blue;
-                        } else {
-                            // Alpha blend with background
-                            PF_Pixel8 bg = outData[outX];
-                            A_u_char alpha = (A_u_char)(coverage * PF_MAX_CHAN8);
-                            outData[outX].alpha = MAX((A_u_char)((alpha * PF_MAX_CHAN8 + (PF_MAX_CHAN8 - alpha) * bg.alpha) / PF_MAX_CHAN8), bg.alpha);
-                            outData[outX].red = (A_u_char)((alpha * color.red + (PF_MAX_CHAN8 - alpha) * bg.red) / PF_MAX_CHAN8);
-                            outData[outX].green = (A_u_char)((alpha * color.green + (PF_MAX_CHAN8 - alpha) * bg.green) / PF_MAX_CHAN8);
-                            outData[outX].blue = (A_u_char)((alpha * color.blue + (PF_MAX_CHAN8 - alpha) * bg.blue) / PF_MAX_CHAN8);
-                        }
+                        outData[outX].alpha = PF_MAX_CHAN8;
+                        outData[outX].red = color.red;
+                        outData[outX].green = color.green;
+                        outData[outX].blue = color.blue;
                     }
                 }
             }
