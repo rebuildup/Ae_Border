@@ -96,30 +96,6 @@ enum {
 
 enum {
     THICKNESS_DISK_ID = 1,
-    COLOR_DISK_ID,
-    THRESHOLD_DISK_ID,
-    DIRECTION_DISK_ID,
-    SHOW_LINE_ONLY_DISK_ID
-};
-
-// Define Smart Render structs locally to avoid missing header issues
-typedef struct PF_SmartRenderCallbacks_Local {
-    PF_Err (*checkout_layer_pixels)(PF_ProgPtr effect_ref, PF_ParamIndex index, PF_EffectWorld **pixels);
-    PF_Err (*checkout_output)(PF_ProgPtr effect_ref, PF_EffectWorld **output);
-    PF_Err (*checkin_layer_pixels)(PF_ProgPtr effect_ref, PF_ParamIndex index);
-    PF_Err (*is_layer_pixel_data_valid)(PF_ProgPtr effect_ref, PF_ParamIndex index, PF_Boolean *valid);
-} PF_SmartRenderCallbacks_Local;
-
-typedef struct PF_SmartRenderExtra_Local {
-    PF_SmartRenderCallbacks_Local *cb;
-    void *unused;
-} PF_SmartRenderExtra_Local;
-
-typedef struct BorderInfo {
-    A_long      thickness;
-    PF_Pixel    color;
-    A_u_char    threshold;
-    A_long      direction;
     PF_Boolean  showLineOnly;
 } BorderInfo, * BorderInfoP, ** BorderInfoH;
 
