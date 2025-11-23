@@ -26,20 +26,6 @@ typedef unsigned short PixelType;
 
 #include "entry.h"
 #include "AE_Effect.h"
-#include "AE_EffectCB.h"
-#include "AE_Macros.h"
-#include "Param_Utils.h"
-#include "AE_EffectCBSuites.h"
-#include "String_Utils.h"
-#include "AE_GeneralPlug.h"
-#include "AEFX_ChannelDepthTpl.h"
-#include "AEGP_SuiteHandler.h"
-
-#include "Border_Strings.h"
-
-/* Versioning information */
-
-#define MAJOR_VERSION    1
 #define MINOR_VERSION    0
 #define BUG_VERSION      0
 #define STAGE_VERSION    PF_Stage_DEVELOP
