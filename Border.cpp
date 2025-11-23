@@ -1,5 +1,6 @@
 ﻿#include "Border.h"
 
+#define NOMINMAX
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -23,10 +24,10 @@ static inline T Clamp(T val, T minVal, T maxVal) {
 // -----------------------------------------------------------------------------
 
 template <typename PixelT>
-struct PixelTraits;
+struct BorderPixelTraits;
 
 template <>
-struct PixelTraits<PF_Pixel> {
+struct BorderPixelTraits<PF_Pixel> {
     using ChannelType = A_u_char;
     static constexpr float MAX_VAL = 255.0f;
     static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
@@ -34,7 +35,7 @@ struct PixelTraits<PF_Pixel> {
 };
 
 template <>
-struct PixelTraits<PF_Pixel16> {
+struct BorderPixelTraits<PF_Pixel16> {
     using ChannelType = A_u_short;
     static constexpr float MAX_VAL = 32768.0f;
     static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
@@ -42,7 +43,7 @@ struct PixelTraits<PF_Pixel16> {
 };
 
 template <>
-struct PixelTraits<PF_PixelFloat> {
+struct BorderPixelTraits<PF_PixelFloat> {
     using ChannelType = PF_FpShort;
     static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
     static inline ChannelType FromFloat(float v) { return static_cast<ChannelType>(v); }
@@ -107,16 +108,16 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
     // Parameters
     float thickness = static_cast<float>(params[BORDER_THICKNESS]->u.fs_d.value);
     PF_Pixel color_param = params[BORDER_COLOR]->u.cd.value;
-    float threshold = static_cast<float>(params[BORDER_THRESHOLD]->u.sd.value) * (PixelTraits<Pixel>::MAX_VAL / 255.0f);
+    float threshold = static_cast<float>(params[BORDER_THRESHOLD]->u.sd.value) * (BorderPixelTraits<Pixel>::MAX_VAL / 255.0f);
     int direction = params[BORDER_DIRECTION]->u.pd.value;
     bool show_line_only = params[BORDER_SHOW_LINE_ONLY]->u.bd.value;
 
     // Convert color param to target depth
     Pixel border_color;
-    border_color.alpha = PixelTraits<Pixel>::FromFloat(PixelTraits<Pixel>::MAX_VAL);
-    border_color.red = PixelTraits<Pixel>::FromFloat(color_param.red * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
-    border_color.green = PixelTraits<Pixel>::FromFloat(color_param.green * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
-    border_color.blue = PixelTraits<Pixel>::FromFloat(color_param.blue * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
+    border_color.alpha = BorderPixelTraits<Pixel>::FromFloat(BorderPixelTraits<Pixel>::MAX_VAL);
+    border_color.red = BorderPixelTraits<Pixel>::FromFloat(color_param.red * (BorderPixelTraits<Pixel>::MAX_VAL / 255.0f));
+    border_color.green = BorderPixelTraits<Pixel>::FromFloat(color_param.green * (BorderPixelTraits<Pixel>::MAX_VAL / 255.0f));
+    border_color.blue = BorderPixelTraits<Pixel>::FromFloat(color_param.blue * (BorderPixelTraits<Pixel>::MAX_VAL / 255.0f));
 
     // Initialize SDF buffers
     // We need two buffers: one for distance to "inside" (foreground), one for distance to "outside" (background).
@@ -133,7 +134,7 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
         for (int y = start_y; y < end_y; ++y) {
             const Pixel* row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
             for (int x = 0; x < width; ++x) {
-                float alpha = PixelTraits<Pixel>::ToFloat(row[x].alpha);
+                float alpha = BorderPixelTraits<Pixel>::ToFloat(row[x].alpha);
                 bool is_inside = alpha > threshold;
                 
                 int idx = y * width + x;
@@ -280,13 +281,13 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
                 Pixel p_in = in_row[x];
                 Pixel p_out;
                 
-                float border_a = PixelTraits<Pixel>::ToFloat(border_color.alpha) * alpha_factor;
+                float border_a = BorderPixelTraits<Pixel>::ToFloat(border_color.alpha) * alpha_factor;
                 
                 if (show_line_only) {
                     p_out.red = border_color.red;
                     p_out.green = border_color.green;
                     p_out.blue = border_color.blue;
-                    p_out.alpha = PixelTraits<Pixel>::FromFloat(border_a);
+                    p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(border_a);
                 } else {
                     // Simple alpha blending: Border over Input
                     // out = border * border_a + input * (1 - border_a)
@@ -298,31 +299,31 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
                     // out.rgb = border.rgb + input.rgb * (1 - border.a)
                     // But border_color from param is usually straight.
                     
-                    float in_a = PixelTraits<Pixel>::ToFloat(p_in.alpha);
+                    float in_a = BorderPixelTraits<Pixel>::ToFloat(p_in.alpha);
                     float ba_norm = alpha_factor; // 0..1
                     
                     // Let's assume straight alpha blending for RGB, then premultiply?
                     // Or just standard lerp.
                     
-                    float out_a = in_a + (PixelTraits<Pixel>::MAX_VAL - in_a) * ba_norm; // Approximation
+                    float out_a = in_a + (BorderPixelTraits<Pixel>::MAX_VAL - in_a) * ba_norm; // Approximation
                     
                     // Correct over operator:
                     // out = src + dst * (1 - src_a)
                     // But here we are painting a stroke.
                     // Let's just mix based on alpha_factor.
                     
-                    float r = PixelTraits<Pixel>::ToFloat(border_color.red);
-                    float g = PixelTraits<Pixel>::ToFloat(border_color.green);
-                    float b = PixelTraits<Pixel>::ToFloat(border_color.blue);
+                    float r = BorderPixelTraits<Pixel>::ToFloat(border_color.red);
+                    float g = BorderPixelTraits<Pixel>::ToFloat(border_color.green);
+                    float b = BorderPixelTraits<Pixel>::ToFloat(border_color.blue);
                     
-                    float ir = PixelTraits<Pixel>::ToFloat(p_in.red);
-                    float ig = PixelTraits<Pixel>::ToFloat(p_in.green);
-                    float ib = PixelTraits<Pixel>::ToFloat(p_in.blue);
+                    float ir = BorderPixelTraits<Pixel>::ToFloat(p_in.red);
+                    float ig = BorderPixelTraits<Pixel>::ToFloat(p_in.green);
+                    float ib = BorderPixelTraits<Pixel>::ToFloat(p_in.blue);
                     
-                    p_out.red = PixelTraits<Pixel>::FromFloat(r * ba_norm + ir * (1.0f - ba_norm));
-                    p_out.green = PixelTraits<Pixel>::FromFloat(g * ba_norm + ig * (1.0f - ba_norm));
-                    p_out.blue = PixelTraits<Pixel>::FromFloat(b * ba_norm + ib * (1.0f - ba_norm));
-                    p_out.alpha = PixelTraits<Pixel>::FromFloat(std::max(in_a, border_a * PixelTraits<Pixel>::MAX_VAL)); // Max alpha
+                    p_out.red = BorderPixelTraits<Pixel>::FromFloat(r * ba_norm + ir * (1.0f - ba_norm));
+                    p_out.green = BorderPixelTraits<Pixel>::FromFloat(g * ba_norm + ig * (1.0f - ba_norm));
+                    p_out.blue = BorderPixelTraits<Pixel>::FromFloat(b * ba_norm + ib * (1.0f - ba_norm));
+                    p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(std::max(in_a, border_a * BorderPixelTraits<Pixel>::MAX_VAL)); // Max alpha
                 }
                 out_row[x] = p_out;
             }
@@ -394,7 +395,7 @@ ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_
 
     PF_ADD_COLOR(
         "Color",
-        1.0f, 0.0f, 0.0f,
+        255, 0, 0,
         BORDER_COLOR);
 
     PF_ADD_FLOAT_SLIDERX(
