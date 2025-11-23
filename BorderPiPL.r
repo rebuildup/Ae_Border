@@ -34,42 +34,6 @@ resource 'PiPL' (16000) {
             2,
             0
         },
-#include "AEConfig.h"
-#include "AE_EffectVers.h"
-
-#ifndef AE_OS_WIN
-    #include <AE_General.r>
-#endif
-    
-resource 'PiPL' (16000) {
-    {    /* array properties: 12 elements */
-        /* [1] */
-        Kind {
-            AEEffect
-        },
-        /* [2] */
-        Name {
-            "Border"
-        },
-        /* [3] */
-        Category {
-            "361do_plugins"
-        },
-#ifdef AE_OS_WIN
-    #ifdef AE_PROC_INTELx64
-        CodeWin64X86 {"EffectMain"},
-    #endif
-#else
-    #ifdef AE_OS_MAC
-        CodeMacIntel64 {"EffectMain"},
-        CodeMacARM64 {"EffectMain"},
-    #endif
-#endif
-        /* [6] */
-        AE_PiPL_Version {
-            2,
-            0
-        },
         /* [7] */
         AE_Effect_Spec_Version {
             PF_PLUG_IN_VERSION,
@@ -77,8 +41,7 @@ resource 'PiPL' (16000) {
         },
         /* [8] */
         AE_Effect_Version {
-            0x00080001
-            0
+            525313
         },
         /* [9] */
         AE_Effect_Info_Flags {
@@ -86,10 +49,10 @@ resource 'PiPL' (16000) {
         },
         /* [10] */
         AE_Effect_Global_OutFlags {
-            0x2000400
+            33556480
         },
         AE_Effect_Global_OutFlags_2 {
-            0x8001001
+            134222849
         },
         /* [11] */
         AE_Effect_Match_Name {
@@ -99,7 +62,6 @@ resource 'PiPL' (16000) {
         AE_Reserved_Info {
             8
         },
-
         /* [13] */
         AE_Effect_Support_URL {
             "https://github.com/rebuildup/Ae_Border"
