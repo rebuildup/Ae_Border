@@ -57,10 +57,8 @@ struct BorderPixelTraits<PF_PixelFloat> {
 // 1D Squared Distance Transform using Parabolic Lower Envelope
 // grid: input/output array of squared distances
 // width: number of elements
-static void EDT_1D(std::vector<float>& grid, int width) {
-    std::vector<float> z(width + 1);
-    std::vector<int> v(width);
-    
+// v, z: pre-allocated buffers
+static void EDT_1D(std::vector<float>& grid, int width, std::vector<int>& v, std::vector<float>& z) {
     int k = 0;
     v[0] = 0;
     z[0] = -INF_DIST;
@@ -163,15 +161,17 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
     // Process each row independently
     auto edt_horizontal = [&](int start_y, int end_y) {
         std::vector<float> row_buf(width);
+        std::vector<int> v(width);
+        std::vector<float> z(width + 1);
         for (int y = start_y; y < end_y; ++y) {
             // Inside
             for(int x=0; x<width; ++x) row_buf[x] = dist_inside[y * width + x];
-            EDT_1D(row_buf, width);
+            EDT_1D(row_buf, width, v, z);
             for(int x=0; x<width; ++x) dist_inside[y * width + x] = row_buf[x];
 
             // Outside
             for(int x=0; x<width; ++x) row_buf[x] = dist_outside[y * width + x];
-            EDT_1D(row_buf, width);
+            EDT_1D(row_buf, width, v, z);
             for(int x=0; x<width; ++x) dist_outside[y * width + x] = row_buf[x];
         }
     };
@@ -186,21 +186,20 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
 
     // 3. EDT Pass 2: Vertical
     // Process each column independently
-    // Need to transpose or just stride? Striding is bad for cache, but for EDT_1D we need a vector.
-    // Let's copy column to vector, process, copy back.
-    
     int cols_per_thread = (width + num_threads - 1) / num_threads;
     auto edt_vertical = [&](int start_x, int end_x) {
         std::vector<float> col_buf(height);
+        std::vector<int> v(height);
+        std::vector<float> z(height + 1);
         for (int x = start_x; x < end_x; ++x) {
             // Inside
             for(int y=0; y<height; ++y) col_buf[y] = dist_inside[y * width + x];
-            EDT_1D(col_buf, height);
+            EDT_1D(col_buf, height, v, z);
             for(int y=0; y<height; ++y) dist_inside[y * width + x] = col_buf[y];
 
             // Outside
             for(int y=0; y<height; ++y) col_buf[y] = dist_outside[y * width + x];
-            EDT_1D(col_buf, height);
+            EDT_1D(col_buf, height, v, z);
             for(int y=0; y<height; ++y) dist_outside[y * width + x] = col_buf[y];
         }
     };
@@ -370,7 +369,7 @@ GlobalSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_
 {
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
     out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE;
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING | PF_OutFlag2_FLOAT_COLOR_AWARE;
+    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
     return PF_Err_NONE;
 }
 
