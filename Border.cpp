@@ -368,32 +368,69 @@ About(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerD
 static PF_Err
 GlobalSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output)
 {
-        pp[BORDER_INPUT] = &p[BORDER_INPUT];
+    out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
+    out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE;
+    return PF_Err_NONE;
+}
 
-        // Params
-        for (int i = 1; i < BORDER_NUM_PARAMS; ++i) {
-            PF_Checkout_Value(in_data, out_data, i, in_data->current_time, in_data->time_step, in_data->time_scale, &p[i]);
-            pp[i] = &p[i];
-        }
+static PF_Err
+ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output)
+{
+    PF_Err err = PF_Err_NONE;
+    PF_ParamDef def;
 
-        // Call Render
-        int bpp = (output_world->width > 0) ? (output_world->rowbytes / output_world->width) : 0;
-        if (bpp == sizeof(PF_PixelFloat)) {
-            err = RenderGeneric<PF_PixelFloat>(in_data, out_data, pp, output_world);
-        } else if (bpp == sizeof(PF_Pixel16)) {
-            err = RenderGeneric<PF_Pixel16>(in_data, out_data, pp, output_world);
-        } else {
-            err = RenderGeneric<PF_Pixel>(in_data, out_data, pp, output_world);
-        }
-        
-        // Checkin params
-        for (int i = 1; i < BORDER_NUM_PARAMS; ++i) {
-            PF_Checkin_Param(in_data, out_data, i, &p[i]);
-        }
-    }
-    
-    if (wsP) suites.SPBasicSuite()->ReleaseSuite(kPFWorldSuite, kPFWorldSuiteVersion2);
+    AEFX_CLR_STRUCT(def);
 
+    PF_ADD_FLOAT_SLIDERX(
+        "Thickness",
+        BORDER_THICKNESS_MIN,
+        BORDER_THICKNESS_MAX,
+        BORDER_THICKNESS_MIN,
+        BORDER_THICKNESS_MAX,
+        BORDER_THICKNESS_DFLT,
+        PF_Precision_TENTHS,
+        0,
+        0,
+        THICKNESS_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+
+    PF_ADD_COLOR(
+        "Color",
+        PF_HALF_CHAN8,
+        PF_MAX_CHAN8,
+        PF_MAX_CHAN8,
+        COLOR_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+
+    PF_ADD_SLIDER(
+        "Threshold",
+        BORDER_THRESHOLD_MIN,
+        BORDER_THRESHOLD_MAX,
+        BORDER_THRESHOLD_MIN,
+        BORDER_THRESHOLD_MAX,
+        BORDER_THRESHOLD_DFLT,
+        THRESHOLD_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+
+    PF_ADD_POPUP(
+        "Direction",
+        3,
+        BORDER_DIRECTION_DFLT,
+        "Both|Inside|Outside",
+        DIRECTION_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+
+    PF_ADD_CHECKBOXX(
+        "Show Line Only",
+        FALSE,
+        0,
+        SHOW_LINE_ONLY_DISK_ID);
+
+    out_data->num_params = BORDER_NUM_PARAMS;
     return err;
 }
 
