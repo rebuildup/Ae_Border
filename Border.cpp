@@ -737,7 +737,7 @@ SmartRender(
                             // Alpha blend with background
                             PF_Pixel16 bg = outData[outX];
                             A_u_short alpha = (A_u_short)(coverage * PF_MAX_CHAN16);
-                            outData[outX].alpha = PF_MAX((A_u_short)((alpha * edge_color.alpha + (PF_MAX_CHAN16 - alpha) * bg.alpha) / PF_MAX_CHAN16), bg.alpha);
+                            outData[outX].alpha = MAX((A_u_short)((alpha * edge_color.alpha + (PF_MAX_CHAN16 - alpha) * bg.alpha) / PF_MAX_CHAN16), bg.alpha);
                             outData[outX].red = (A_u_short)((alpha * edge_color.red + (PF_MAX_CHAN16 - alpha) * bg.red) / PF_MAX_CHAN16);
                             outData[outX].green = (A_u_short)((alpha * edge_color.green + (PF_MAX_CHAN16 - alpha) * bg.green) / PF_MAX_CHAN16);
                             outData[outX].blue = (A_u_short)((alpha * edge_color.blue + (PF_MAX_CHAN16 - alpha) * bg.blue) / PF_MAX_CHAN16);
@@ -783,7 +783,7 @@ SmartRender(
                             // Alpha blend with background
                             PF_Pixel8 bg = outData[outX];
                             A_u_char alpha = (A_u_char)(coverage * PF_MAX_CHAN8);
-                            outData[outX].alpha = PF_MAX((A_u_char)((alpha * PF_MAX_CHAN8 + (PF_MAX_CHAN8 - alpha) * bg.alpha) / PF_MAX_CHAN8), bg.alpha);
+                            outData[outX].alpha = MAX((A_u_char)((alpha * PF_MAX_CHAN8 + (PF_MAX_CHAN8 - alpha) * bg.alpha) / PF_MAX_CHAN8), bg.alpha);
                             outData[outX].red = (A_u_char)((alpha * color.red + (PF_MAX_CHAN8 - alpha) * bg.red) / PF_MAX_CHAN8);
                             outData[outX].green = (A_u_char)((alpha * color.green + (PF_MAX_CHAN8 - alpha) * bg.green) / PF_MAX_CHAN8);
                             outData[outX].blue = (A_u_char)((alpha * color.blue + (PF_MAX_CHAN8 - alpha) * bg.blue) / PF_MAX_CHAN8);
