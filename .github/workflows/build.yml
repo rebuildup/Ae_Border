@@ -306,6 +306,13 @@ jobs:
           echo "SDK root: $SDK_ROOT"
           mkdir -p "$SDK_ROOT/Template"
           echo "SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          
+          # Fix permissions for PiPLTool
+          if [ -f "$SDK_ROOT/Resources/PiPLTool" ]; then
+            chmod +x "$SDK_ROOT/Resources/PiPLTool"
+            echo "Made PiPLTool executable"
+          fi
+          
           rm -f ../../AE_SDK.zip 2>/dev/null || true
           set -e
 
