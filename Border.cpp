@@ -414,9 +414,10 @@ static PF_Err
 SmartRender(
     PF_InData* in_data,
     PF_OutData* out_data,
-    PF_SmartRenderExtra* extra)
+    void* extraP)
 {
     PF_Err err = PF_Err_NONE;
+    PF_SmartRenderExtra_Local* extra = (PF_SmartRenderExtra_Local*)extraP;
     PF_EffectWorld* input_world = NULL;
     PF_EffectWorld* output_world = NULL;
     
@@ -503,7 +504,7 @@ PF_Err EffectMain(PF_Cmd cmd,
         case PF_Cmd_PARAMS_SETUP: err = ParamsSetup(in_data, out_data, params, output); break;
         case PF_Cmd_RENDER: err = Render(in_data, out_data, params, output); break;
         case PF_Cmd_SMART_PRE_RENDER: err = PreRender(in_data, out_data, (PF_PreRenderExtra*)extra); break;
-        case PF_Cmd_SMART_RENDER: err = SmartRender(in_data, out_data, (PF_SmartRenderExtra*)extra); break;
+        case PF_Cmd_SMART_RENDER: err = SmartRender(in_data, out_data, extra); break;
         default: break;
         }
     }
