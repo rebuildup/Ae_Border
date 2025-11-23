@@ -7,21 +7,13 @@
 #ifndef BORDER_H
 #define BORDER_H
 
-typedef unsigned char		u_char;
-typedef unsigned short		u_short;
-typedef unsigned short		u_int16;
-typedef unsigned long		u_long;
-typedef short int			int16;
-#define PF_TABLE_BITS	12
-#define PF_TABLE_SZ_16	4096
-
 #define PF_DEEP_COLOR_AWARE 1
 
 #include "AEConfig.h"
 
 #ifdef AE_OS_WIN
-typedef unsigned short PixelType;
-#include <Windows.h>
+    typedef unsigned short PixelType;
+    #include <Windows.h>
 #endif
 
 #include "entry.h"
@@ -32,20 +24,28 @@ typedef unsigned short PixelType;
 #include "AE_EffectCBSuites.h"
 #include "String_Utils.h"
 #include "AE_GeneralPlug.h"
+
+/* Define PF_TABLE_BITS before including AEFX_ChannelDepthTpl.h */
+#define PF_TABLE_BITS	12
+#define PF_TABLE_SZ_16	4096
+
 #include "AEFX_ChannelDepthTpl.h"
 #include "AEGP_SuiteHandler.h"
 
 #include "Border_Strings.h"
 
 /* Versioning information */
+#define	MAJOR_VERSION	1
+#define	MINOR_VERSION	0
+#define	BUG_VERSION		0
+#define	STAGE_VERSION	PF_Stage_DEVELOP
+#define	BUILD_VERSION	1
 
-#define MAJOR_VERSION    1
-#define MINOR_VERSION    0
-#define BUG_VERSION      0
-#define STAGE_VERSION    PF_Stage_DEVELOP
-#define BUILD_VERSION    1
-
-/* Parameter defaults */
+typedef unsigned char		u_char;
+typedef unsigned short		u_short;
+typedef unsigned short		u_int16;
+typedef unsigned long		u_long;
+typedef short int			int16;
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
@@ -87,24 +87,21 @@ enum {
 };
 
 typedef struct BorderInfo {
-    A_long      thickness;
-    PF_Pixel    color;
-    A_u_char    threshold;
-    A_long      direction;
-    PF_Boolean  showLineOnly;
-} BorderInfo, * BorderInfoP, ** BorderInfoH;
+    PF_FpLong thickness;
+    PF_Boolean showLineOnly;
+} BorderInfo, *BorderInfoP, **BorderInfoH;
 
 extern "C" {
 
     DllExport
-        PF_Err
-        EffectMain(
-            PF_Cmd			cmd,
-            PF_InData* in_data,
-            PF_OutData* out_data,
-            PF_ParamDef* params[],
-            PF_LayerDef* output,
-            void* extra);
+    PF_Err
+    EffectMain(
+        PF_Cmd			cmd,
+        PF_InData		*in_data,
+        PF_OutData		*out_data,
+        PF_ParamDef		*params[],
+        PF_LayerDef		*output,
+        void			*extra);
 
 }
 
