@@ -4,8 +4,6 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <thread>
-#include <atomic>
 #include <limits>
 
 // -----------------------------------------------------------------------------
@@ -125,217 +123,116 @@ static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDe
     std::vector<float> dist_outside(width * height);
 
     // 1. Initialization Pass
-    // Parallelize initialization
-    int num_threads = std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> threads;
-
-    auto init_buffers = [&](int start_y, int end_y) {
-        for (int y = start_y; y < end_y; ++y) {
-            const Pixel* row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
-            for (int x = 0; x < width; ++x) {
-                float alpha = BorderPixelTraits<Pixel>::ToFloat(row[x].alpha);
-                bool is_inside = alpha > threshold;
-                
-                int idx = y * width + x;
-                if (is_inside) {
-                    dist_inside[idx] = 0.0f;
-                    dist_outside[idx] = INF_DIST;
-                } else {
-                    dist_inside[idx] = INF_DIST;
-                    dist_outside[idx] = 0.0f;
-                }
+    for (int y = 0; y < height; ++y) {
+        const Pixel* row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
+        for (int x = 0; x < width; ++x) {
+            float alpha = BorderPixelTraits<Pixel>::ToFloat(row[x].alpha);
+            bool is_inside = alpha > threshold;
+            
+            int idx = y * width + x;
+            if (is_inside) {
+                dist_inside[idx] = 0.0f;
+                dist_outside[idx] = INF_DIST;
+            } else {
+                dist_inside[idx] = INF_DIST;
+                dist_outside[idx] = 0.0f;
             }
         }
-    };
-
-    int rows_per_thread = (height + num_threads - 1) / num_threads;
-    for (int i = 0; i < num_threads; ++i) {
-        int start = i * rows_per_thread;
-        int end = std::min(start + rows_per_thread, height);
-        if (start < end) threads.emplace_back(init_buffers, start, end);
     }
-    for (auto& t : threads) t.join();
-    threads.clear();
 
     // 2. EDT Pass 1: Horizontal
-    // Process each row independently
-    auto edt_horizontal = [&](int start_y, int end_y) {
-        std::vector<float> row_buf(width);
-        std::vector<int> v(width);
-        std::vector<float> z(width + 1);
-        for (int y = start_y; y < end_y; ++y) {
-            // Inside
-            for(int x=0; x<width; ++x) row_buf[x] = dist_inside[y * width + x];
-            EDT_1D(row_buf, width, v, z);
-            for(int x=0; x<width; ++x) dist_inside[y * width + x] = row_buf[x];
+    std::vector<float> row_buf(width);
+    std::vector<int> v(width);
+    std::vector<float> z(width + 1);
+    for (int y = 0; y < height; ++y) {
+        // Inside
+        for(int x=0; x<width; ++x) row_buf[x] = dist_inside[y * width + x];
+        EDT_1D(row_buf, width, v, z);
+        for(int x=0; x<width; ++x) dist_inside[y * width + x] = row_buf[x];
 
-            // Outside
-            for(int x=0; x<width; ++x) row_buf[x] = dist_outside[y * width + x];
-            EDT_1D(row_buf, width, v, z);
-            for(int x=0; x<width; ++x) dist_outside[y * width + x] = row_buf[x];
-        }
-    };
-
-    for (int i = 0; i < num_threads; ++i) {
-        int start = i * rows_per_thread;
-        int end = std::min(start + rows_per_thread, height);
-        if (start < end) threads.emplace_back(edt_horizontal, start, end);
+        // Outside
+        for(int x=0; x<width; ++x) row_buf[x] = dist_outside[y * width + x];
+        EDT_1D(row_buf, width, v, z);
+        for(int x=0; x<width; ++x) dist_outside[y * width + x] = row_buf[x];
     }
-    for (auto& t : threads) t.join();
-    threads.clear();
 
     // 3. EDT Pass 2: Vertical
-    // Process each column independently
-    int cols_per_thread = (width + num_threads - 1) / num_threads;
-    auto edt_vertical = [&](int start_x, int end_x) {
-        std::vector<float> col_buf(height);
-        std::vector<int> v(height);
-        std::vector<float> z(height + 1);
-        for (int x = start_x; x < end_x; ++x) {
-            // Inside
-            for(int y=0; y<height; ++y) col_buf[y] = dist_inside[y * width + x];
-            EDT_1D(col_buf, height, v, z);
-            for(int y=0; y<height; ++y) dist_inside[y * width + x] = col_buf[y];
+    std::vector<float> col_buf(height);
+    std::vector<int> v_col(height);
+    std::vector<float> z_col(height + 1);
+    for (int x = 0; x < width; ++x) {
+        // Inside
+        for(int y=0; y<height; ++y) col_buf[y] = dist_inside[y * width + x];
+        EDT_1D(col_buf, height, v_col, z_col);
+        for(int y=0; y<height; ++y) dist_inside[y * width + x] = col_buf[y];
 
-            // Outside
-            for(int y=0; y<height; ++y) col_buf[y] = dist_outside[y * width + x];
-            EDT_1D(col_buf, height, v, z);
-            for(int y=0; y<height; ++y) dist_outside[y * width + x] = col_buf[y];
-        }
-    };
-
-    for (int i = 0; i < num_threads; ++i) {
-        int start = i * cols_per_thread;
-        int end = std::min(start + cols_per_thread, width);
-        if (start < end) threads.emplace_back(edt_vertical, start, end);
+        // Outside
+        for(int y=0; y<height; ++y) col_buf[y] = dist_outside[y * width + x];
+        EDT_1D(col_buf, height, v_col, z_col);
+        for(int y=0; y<height; ++y) dist_outside[y * width + x] = col_buf[y];
     }
-    for (auto& t : threads) t.join();
-    threads.clear();
 
     // 4. Render Pass
-    auto render_rows = [&](int start_y, int end_y) {
-        for (int y = start_y; y < end_y; ++y) {
-            Pixel* out_row = reinterpret_cast<Pixel*>(output_base + y * output_rowbytes);
-            const Pixel* in_row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
+    for (int y = 0; y < height; ++y) {
+        Pixel* out_row = reinterpret_cast<Pixel*>(output_base + y * output_rowbytes);
+        const Pixel* in_row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
+        
+        for (int x = 0; x < width; ++x) {
+            int idx = y * width + x;
+            float d_in = std::sqrt(dist_inside[idx]);
+            float d_out = std::sqrt(dist_outside[idx]);
             
-            for (int x = 0; x < width; ++x) {
-                int idx = y * width + x;
-                float d_in = std::sqrt(dist_inside[idx]);
-                float d_out = std::sqrt(dist_outside[idx]);
-                
-                // Signed distance: negative inside, positive outside
-                // But here: d_in is 0 inside, >0 outside (distance to nearest inside pixel)
-                // Wait, dist_inside initialized to 0 inside. So d_in is distance FROM inside set?
-                // No, EDT computes distance to nearest 0.
-                // If inside pixels are 0, then d_in is distance to nearest inside pixel.
-                // So inside the object, d_in is 0. Outside, it increases.
-                
-                // We want distance to the EDGE.
-                // Edge is where transition happens.
-                // d_out: distance to nearest outside pixel. Inside object, it increases. Outside, it is 0.
-                
-                // SDF = d_in - d_out?
-                // Inside: d_in = 0, d_out > 0. SDF = -d_out (negative inside).
-                // Outside: d_in > 0, d_out = 0. SDF = d_in (positive outside).
-                // Correct.
-                
-                float sdf = d_in - d_out;
-                
-                // Adjust SDF based on direction
-                // Thickness T.
-                // Both: -T/2 to T/2.
-                // Inside: -T to 0.
-                // Outside: 0 to T.
-                
-                float alpha_factor = 0.0f;
-                float aa_width = 1.0f; // 1 pixel AA
-                
-                if (direction == DIRECTION_BOTH) {
-                    // Border is centered at 0. Width T.
-                    // Range [-T/2, T/2].
-                    // Distance from center of border: abs(sdf).
-                    // Coverage = 1 - smoothstep(T/2 - 0.5, T/2 + 0.5, abs(sdf))
-                    float half_t = thickness * 0.5f;
-                    float d = std::abs(sdf);
-                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
-                } else if (direction == DIRECTION_INSIDE) {
-                    // Border from -T to 0.
-                    // We want 1 when sdf in [-T, 0].
-                    // Distance from center (-T/2): abs(sdf - (-T/2)) = abs(sdf + T/2)
-                    // Same logic as Both but shifted.
-                    float half_t = thickness * 0.5f;
-                    float d = std::abs(sdf + half_t);
-                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
-                } else { // Outside
-                    // Border from 0 to T.
-                    // Center T/2.
-                    float half_t = thickness * 0.5f;
-                    float d = std::abs(sdf - half_t);
-                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
-                }
-
-                // Composite
-                // If show_line_only, just show border color * alpha_factor.
-                // Else, composite border over input.
-                
-                Pixel p_in = in_row[x];
-                Pixel p_out;
-                
-                float border_a = BorderPixelTraits<Pixel>::ToFloat(border_color.alpha) * alpha_factor;
-                
-                if (show_line_only) {
-                    p_out.red = border_color.red;
-                    p_out.green = border_color.green;
-                    p_out.blue = border_color.blue;
-                    p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(border_a);
-                } else {
-                    // Simple alpha blending: Border over Input
-                    // out = border * border_a + input * (1 - border_a)
-                    // Note: Pre-multiplied alpha handling might be needed if AE expects it.
-                    // Assuming straight alpha for simplicity or standard AE compositing.
-                    // AE usually uses pre-multiplied alpha.
-                    // If pre-multiplied:
-                    // out.a = border.a + input.a * (1 - border.a)
-                    // out.rgb = border.rgb + input.rgb * (1 - border.a)
-                    // But border_color from param is usually straight.
-                    
-                    float in_a = BorderPixelTraits<Pixel>::ToFloat(p_in.alpha);
-                    float ba_norm = alpha_factor; // 0..1
-                    
-                    // Let's assume straight alpha blending for RGB, then premultiply?
-                    // Or just standard lerp.
-                    
-                    float out_a = in_a + (BorderPixelTraits<Pixel>::MAX_VAL - in_a) * ba_norm; // Approximation
-                    
-                    // Correct over operator:
-                    // out = src + dst * (1 - src_a)
-                    // But here we are painting a stroke.
-                    // Let's just mix based on alpha_factor.
-                    
-                    float r = BorderPixelTraits<Pixel>::ToFloat(border_color.red);
-                    float g = BorderPixelTraits<Pixel>::ToFloat(border_color.green);
-                    float b = BorderPixelTraits<Pixel>::ToFloat(border_color.blue);
-                    
-                    float ir = BorderPixelTraits<Pixel>::ToFloat(p_in.red);
-                    float ig = BorderPixelTraits<Pixel>::ToFloat(p_in.green);
-                    float ib = BorderPixelTraits<Pixel>::ToFloat(p_in.blue);
-                    
-                    p_out.red = BorderPixelTraits<Pixel>::FromFloat(r * ba_norm + ir * (1.0f - ba_norm));
-                    p_out.green = BorderPixelTraits<Pixel>::FromFloat(g * ba_norm + ig * (1.0f - ba_norm));
-                    p_out.blue = BorderPixelTraits<Pixel>::FromFloat(b * ba_norm + ib * (1.0f - ba_norm));
-                    p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(std::max(in_a, border_a * BorderPixelTraits<Pixel>::MAX_VAL)); // Max alpha
-                }
-                out_row[x] = p_out;
+            float sdf = d_in - d_out;
+            
+            float alpha_factor = 0.0f;
+            float aa_width = 1.0f; // 1 pixel AA
+            
+            if (direction == DIRECTION_BOTH) {
+                float half_t = thickness * 0.5f;
+                float d = std::abs(sdf);
+                alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
+            } else if (direction == DIRECTION_INSIDE) {
+                float half_t = thickness * 0.5f;
+                float d = std::abs(sdf + half_t);
+                alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
+            } else { // Outside
+                float half_t = thickness * 0.5f;
+                float d = std::abs(sdf - half_t);
+                alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
             }
-        }
-    };
 
-    for (int i = 0; i < num_threads; ++i) {
-        int start = i * rows_per_thread;
-        int end = std::min(start + rows_per_thread, height);
-        if (start < end) threads.emplace_back(render_rows, start, end);
+            Pixel p_in = in_row[x];
+            Pixel p_out;
+            
+            float border_a = BorderPixelTraits<Pixel>::ToFloat(border_color.alpha) * alpha_factor;
+            
+            if (show_line_only) {
+                p_out.red = border_color.red;
+                p_out.green = border_color.green;
+                p_out.blue = border_color.blue;
+                p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(border_a);
+            } else {
+                float in_a = BorderPixelTraits<Pixel>::ToFloat(p_in.alpha);
+                float ba_norm = alpha_factor; // 0..1
+                
+                float out_a = in_a + (BorderPixelTraits<Pixel>::MAX_VAL - in_a) * ba_norm;
+                
+                float r = BorderPixelTraits<Pixel>::ToFloat(border_color.red);
+                float g = BorderPixelTraits<Pixel>::ToFloat(border_color.green);
+                float b = BorderPixelTraits<Pixel>::ToFloat(border_color.blue);
+                
+                float ir = BorderPixelTraits<Pixel>::ToFloat(p_in.red);
+                float ig = BorderPixelTraits<Pixel>::ToFloat(p_in.green);
+                float ib = BorderPixelTraits<Pixel>::ToFloat(p_in.blue);
+                
+                p_out.red = BorderPixelTraits<Pixel>::FromFloat(r * ba_norm + ir * (1.0f - ba_norm));
+                p_out.green = BorderPixelTraits<Pixel>::FromFloat(g * ba_norm + ig * (1.0f - ba_norm));
+                p_out.blue = BorderPixelTraits<Pixel>::FromFloat(b * ba_norm + ib * (1.0f - ba_norm));
+                p_out.alpha = BorderPixelTraits<Pixel>::FromFloat(std::max(in_a, border_a * BorderPixelTraits<Pixel>::MAX_VAL));
+            }
+            out_row[x] = p_out;
+        }
     }
-    for (auto& t : threads) t.join();
 
     return PF_Err_NONE;
 }
@@ -468,6 +365,13 @@ PF_Err EffectMain(PF_Cmd cmd,
         case PF_Cmd_ABOUT: err = About(in_data, out_data, params, output); break;
         case PF_Cmd_GLOBAL_SETUP: err = GlobalSetup(in_data, out_data, params, output); break;
         case PF_Cmd_PARAMS_SETUP: err = ParamsSetup(in_data, out_data, params, output); break;
+        case PF_Cmd_SEQUENCE_SETUP:
+        case PF_Cmd_SEQUENCE_SETDOWN:
+        case PF_Cmd_SEQUENCE_FLATTEN:
+            break;
+        case PF_Cmd_FRAME_SETUP:
+        case PF_Cmd_FRAME_SETDOWN:
+            break;
         case PF_Cmd_RENDER: err = Render(in_data, out_data, params, output); break;
         default: break;
         }
