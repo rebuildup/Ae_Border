@@ -442,7 +442,7 @@ GenerateDistanceField(
                     continue;
                 }
 
-                float distSq = dx * dx + dy * dy;
+                float distSq = static_cast<float>(dx * dx + dy * dy);
 
                 if (distSq > regionSize * regionSize) {
                     continue;
@@ -503,10 +503,10 @@ PreRender(
         pixelThickness = 0.0f;
     }
     else if (thickness <= 10.0f) {
-        pixelThickness = thickness;
+        pixelThickness = static_cast<float>(thickness);
     }
     else {
-        float normalizedThickness = (thickness - 10.0f) / 90.0f;
+        float normalizedThickness = static_cast<float>((thickness - 10.0f) / 90.0f);
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
@@ -605,10 +605,10 @@ SmartRender(
         pixelThickness = 0.0f;
     }
     else if (thickness <= 10.0f) {
-        pixelThickness = thickness;
+        pixelThickness = static_cast<float>(thickness);
     }
     else {
-        float normalizedThickness = (thickness - 10.0f) / 90.0f;
+        float normalizedThickness = static_cast<float>((thickness - 10.0f) / 90.0f);
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
