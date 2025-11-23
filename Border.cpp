@@ -615,6 +615,16 @@ SmartRender(
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
 
     if (input && output) {
+        // Calculate offset between input and output
+        A_long offsetX = input->origin_x - output->origin_x;
+        A_long offsetY = input->origin_y - output->origin_y;
+
+        // Generate distance field for anti-aliasing
+        std::vector<float> distanceField;
+        A_u_short threshold16 = threshold * 257;
+        ERR(GenerateDistanceField(input, threshold, threshold16, direction, distanceField, 
+                                   input->width, input->height, 0, 0));
+
         // STEP 1: Clear the output buffer to transparency
         if (PF_WORLD_IS_DEEP(output)) {
             for (A_long y = 0; y < output->height; y++) {
@@ -641,9 +651,6 @@ SmartRender(
 
         // STEP 2: Copy the source layer if not "show line only"
         if (!showLineOnly) {
-            A_long offsetX = input->origin_x - output->origin_x;
-            A_long offsetY = input->origin_y - output->origin_y;
-
             if (PF_WORLD_IS_DEEP(output)) {
                 for (A_long y = 0; y < input->height; y++) {
                     A_long outY = y + offsetY;
@@ -688,9 +695,6 @@ SmartRender(
         A_long search_top = -search_margin;
         A_long search_right = input->width + search_margin;
         A_long search_bottom = input->height + search_margin;
-
-        A_long offsetX = input->origin_x - output->origin_x;
-        A_long offsetY = input->origin_y - output->origin_y;
 
         const float AA_RANGE = 1.0f; // 1 pixel anti-aliasing range
 
