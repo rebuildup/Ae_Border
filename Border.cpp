@@ -419,10 +419,10 @@ SmartRender(
     PF_Err err = PF_Err_NONE;
     PF_EffectWorld* input_world = NULL;
     PF_EffectWorld* output_world = NULL;
+    
+    AEGP_SuiteHandler suites(in_data->pica_basicP);
     PF_WorldSuite2* wsP = NULL;
-
-    // Get World Suite
-    ERR(in_data->pica_basicP->AcquireSuite(kPFWorldSuite, kPFWorldSuiteVersion2, (const void**)&wsP));
+    ERR(suites.SPBasicSuite()->AcquireSuite(kPFWorldSuite, kPFWorldSuiteVersion2, (const void**)&wsP));
 
     if (!err) {
         // Checkout input/output
@@ -462,7 +462,7 @@ SmartRender(
         }
     }
     
-    if (wsP) in_data->pica_basicP->ReleaseSuite(kPFWorldSuite, kPFWorldSuiteVersion2);
+    if (wsP) suites.SPBasicSuite()->ReleaseSuite(kPFWorldSuite, kPFWorldSuiteVersion2);
 
     return err;
 }
