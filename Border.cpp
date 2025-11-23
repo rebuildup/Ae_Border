@@ -682,7 +682,7 @@ SmartRender(
             }
         }
 
-        // STEP 3: Draw the border (fast version without anti-aliasing)
+        // STEP 3: Draw the border with distance-based anti-aliasing
         A_long search_margin = thicknessInt + 5;
         A_long search_left = -search_margin;
         A_long search_top = -search_margin;
@@ -691,6 +691,8 @@ SmartRender(
 
         A_long offsetX = input->origin_x - output->origin_x;
         A_long offsetY = input->origin_y - output->origin_y;
+
+        const float AA_RANGE = 1.0f; // 1 pixel anti-aliasing range
 
         if (PF_WORLD_IS_DEEP(output)) {
             A_u_short threshold16 = threshold * 257;
@@ -707,10 +709,38 @@ SmartRender(
                     A_long outY = y + offsetY;
 
                     if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
+                    if (x < 0 || x >= input->width || y < 0 || y >= input->height) continue;
 
-                    if (IsEdgePixel16(input, x, y, threshold16, thicknessInt, direction)) {
-                        PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+                    float dist = distanceField[y * input->width + x];
+                    if (dist < 0.0f || dist > thicknessInt) continue;
+
+                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+                    PF_Pixel16* srcData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+                    PF_Pixel16 src = srcData[x];
+                    bool isTransparent = (src.alpha <= threshold16);
+
+                    // Calculate blend factor based on distance
+                    float t = 1.0f;
+                    if (dist < AA_RANGE) {
+                        // Inner AA: blend color with original
+                        t = dist / AA_RANGE;
+                    } else if (dist > thicknessInt - AA_RANGE) {
+                        // Outer AA: fade out alpha
+                        t = (thicknessInt - dist) / AA_RANGE;
+                    }
+                    t = MAX(0.0f, MIN(1.0f, t));
+
+                    if (direction == DIRECTION_INSIDE && !isTransparent) {
+                        // Inside: blend with original color
+                        float blend = t;
+                        outData[outX].red = (A_u_short)(edge_color.red * blend + src.red * (1.0f - blend));
+                        outData[outX].green = (A_u_short)(edge_color.green * blend + src.green * (1.0f - blend));
+                        outData[outX].blue = (A_u_short)(edge_color.blue * blend + src.blue * (1.0f - blend));
+                        outData[outX].alpha = src.alpha;
+                    } else {
+                        // Outside/Both: fade alpha
                         outData[outX] = edge_color;
+                        outData[outX].alpha = (A_u_short)(edge_color.alpha * t);
                     }
                 }
             }
@@ -722,13 +752,40 @@ SmartRender(
                     A_long outY = y + offsetY;
 
                     if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
+                    if (x < 0 || x >= input->width || y < 0 || y >= input->height) continue;
 
-                    if (IsEdgePixel8(input, x, y, threshold, thicknessInt, direction)) {
-                        PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-                        outData[outX].alpha = PF_MAX_CHAN8;
+                    float dist = distanceField[y * input->width + x];
+                    if (dist < 0.0f || dist > thicknessInt) continue;
+
+                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
+                    PF_Pixel8* srcData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+                    PF_Pixel8 src = srcData[x];
+                    bool isTransparent = (src.alpha <= threshold);
+
+                    // Calculate blend factor based on distance
+                    float t = 1.0f;
+                    if (dist < AA_RANGE) {
+                        // Inner AA: blend color with original
+                        t = dist / AA_RANGE;
+                    } else if (dist > thicknessInt - AA_RANGE) {
+                        // Outer AA: fade out alpha
+                        t = (thicknessInt - dist) / AA_RANGE;
+                    }
+                    t = MAX(0.0f, MIN(1.0f, t));
+
+                    if (direction == DIRECTION_INSIDE && !isTransparent) {
+                        // Inside: blend with original color
+                        float blend = t;
+                        outData[outX].red = (A_u_char)(color.red * blend + src.red * (1.0f - blend));
+                        outData[outX].green = (A_u_char)(color.green * blend + src.green * (1.0f - blend));
+                        outData[outX].blue = (A_u_char)(color.blue * blend + src.blue * (1.0f - blend));
+                        outData[outX].alpha = src.alpha;
+                    } else {
+                        // Outside/Both: fade alpha
                         outData[outX].red = color.red;
                         outData[outX].green = color.green;
                         outData[outX].blue = color.blue;
+                        outData[outX].alpha = (A_u_char)(PF_MAX_CHAN8 * t);
                     }
                 }
             }
