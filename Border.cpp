@@ -374,6 +374,13 @@ GlobalSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_
     return PF_Err_NONE;
 }
 
+static void UnionLRect(const PF_LRect* src, PF_LRect* dst) {
+    if (src->left < dst->left) dst->left = src->left;
+    if (src->top < dst->top) dst->top = src->top;
+    if (src->right > dst->right) dst->right = src->right;
+    if (src->bottom > dst->bottom) dst->bottom = src->bottom;
+}
+
 static PF_Err
 PreRender(
     PF_InData* in_data,
@@ -415,7 +422,7 @@ SmartRender(
     PF_WorldSuite2* wsP = NULL;
 
     // Get World Suite
-    ERR(AEFX_AcquireSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, "PFWorldSuite", (void**)&wsP));
+    ERR(in_data->pica_basicP->AcquireSuite(kPFWorldSuite, kPFWorldSuiteVersion2, (const void**)&wsP));
 
     if (!err) {
         // Checkout input/output
@@ -455,7 +462,7 @@ SmartRender(
         }
     }
     
-    if (wsP) AEFX_ReleaseSuite(in_data, out_data, kPFWorldSuite, kPFWorldSuiteVersion2, "PFWorldSuite");
+    if (wsP) in_data->pica_basicP->ReleaseSuite(kPFWorldSuite, kPFWorldSuiteVersion2);
 
     return err;
 }
