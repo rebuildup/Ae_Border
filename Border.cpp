@@ -365,13 +365,6 @@ PF_Err EffectMain(PF_Cmd cmd,
         case PF_Cmd_ABOUT: err = About(in_data, out_data, params, output); break;
         case PF_Cmd_GLOBAL_SETUP: err = GlobalSetup(in_data, out_data, params, output); break;
         case PF_Cmd_PARAMS_SETUP: err = ParamsSetup(in_data, out_data, params, output); break;
-        case PF_Cmd_SEQUENCE_SETUP:
-        case PF_Cmd_SEQUENCE_SETDOWN:
-        case PF_Cmd_SEQUENCE_FLATTEN:
-            break;
-        case PF_Cmd_FRAME_SETUP:
-        case PF_Cmd_FRAME_SETDOWN:
-            break;
         case PF_Cmd_RENDER: err = Render(in_data, out_data, params, output); break;
         default: break;
         }
