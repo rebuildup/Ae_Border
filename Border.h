@@ -24,6 +24,11 @@
 #include "AE_EffectCBSuites.h"
 #include "String_Utils.h"
 #include "AE_GeneralPlug.h"
+
+/* Define PF_TABLE_BITS before including AEFX_ChannelDepthTpl.h */
+#define PF_TABLE_BITS	12
+#define PF_TABLE_SZ_16	4096
+
 #include "AEFX_ChannelDepthTpl.h"
 #include "AEGP_SuiteHandler.h"
 
@@ -41,9 +46,6 @@ typedef unsigned short		u_short;
 typedef unsigned short		u_int16;
 typedef unsigned long		u_long;
 typedef short int			int16;
-
-#define PF_TABLE_BITS	12
-#define PF_TABLE_SZ_16	4096
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
