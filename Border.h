@@ -15,24 +15,6 @@ typedef short int			int16;
 #define PF_TABLE_BITS	12
 #define PF_TABLE_SZ_16	4096
 
-#define PF_DEEP_COLOR_AWARE 1
-
-#include "AEConfig.h"
-
-#ifdef AE_OS_WIN
-typedef unsigned short PixelType;
-#include <Windows.h>
-#endif
-
-#include "entry.h"
-#include "AE_Effect.h"
-#define MINOR_VERSION    0
-#define BUG_VERSION      0
-#define STAGE_VERSION    PF_Stage_DEVELOP
-#define BUILD_VERSION    1
-
-/* Parameter defaults */
-
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
 #define BORDER_THICKNESS_DFLT    1.0
