@@ -1,33 +1,359 @@
 ﻿#include "Border.h"
+
 #include <vector>
 #include <algorithm>
-#include <cfloat>
+#include <cmath>
+#include <thread>
+#include <atomic>
+#include <limits>
 
-#ifdef _WIN32
-#include <omp.h>
-#endif
+// -----------------------------------------------------------------------------
+// Constants & Helpers
+// -----------------------------------------------------------------------------
 
-struct EdgePoint {
-    A_long x, y;
-    bool isTransparent;
-};
+static const float INF_DIST = 1e9f;
 
 template <typename T>
-T CLAMP(T value, T min, T max) {
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
+static inline T Clamp(T val, T minVal, T maxVal) {
+    return std::max(minVal, std::min(val, maxVal));
+}
+
+// -----------------------------------------------------------------------------
+// Pixel Traits
+// -----------------------------------------------------------------------------
+
+template <typename PixelT>
+struct PixelTraits;
+
+template <>
+struct PixelTraits<PF_Pixel> {
+    using ChannelType = A_u_char;
+    static constexpr float MAX_VAL = 255.0f;
+    static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
+    static inline ChannelType FromFloat(float v) { return static_cast<ChannelType>(Clamp(v, 0.0f, MAX_VAL) + 0.5f); }
+};
+
+template <>
+struct PixelTraits<PF_Pixel16> {
+    using ChannelType = A_u_short;
+    static constexpr float MAX_VAL = 32768.0f;
+    static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
+    static inline ChannelType FromFloat(float v) { return static_cast<ChannelType>(Clamp(v, 0.0f, MAX_VAL) + 0.5f); }
+};
+
+template <>
+struct PixelTraits<PF_PixelFloat> {
+    using ChannelType = PF_FpShort;
+    static inline float ToFloat(ChannelType v) { return static_cast<float>(v); }
+    static inline ChannelType FromFloat(float v) { return static_cast<ChannelType>(v); }
+};
+
+// -----------------------------------------------------------------------------
+// Euclidean Distance Transform (EDT) Helpers
+// -----------------------------------------------------------------------------
+
+// 1D Squared Distance Transform using Parabolic Lower Envelope
+// grid: input/output array of squared distances
+// width: number of elements
+static void EDT_1D(std::vector<float>& grid, int width) {
+    std::vector<float> z(width + 1);
+    std::vector<int> v(width);
+    
+    int k = 0;
+    v[0] = 0;
+    z[0] = -INF_DIST;
+    z[1] = INF_DIST;
+
+    for (int q = 1; q < width; q++) {
+        float s = ((grid[q] + q * q) - (grid[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+        while (s <= z[k]) {
+            k--;
+            s = ((grid[q] + q * q) - (grid[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+        }
+        k++;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = INF_DIST;
+    }
+
+    k = 0;
+    for (int q = 0; q < width; q++) {
+        while (z[k + 1] < q) {
+            k++;
+        }
+        float dx = (float)(q - v[k]);
+        grid[q] = dx * dx + grid[v[k]];
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Rendering
+// -----------------------------------------------------------------------------
+
+template <typename Pixel>
+static PF_Err RenderGeneric(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output) {
+    PF_EffectWorld* input = &params[BORDER_INPUT]->u.ld;
+    
+    const int width = output->width;
+    const int height = output->height;
+    
+    if (width <= 0 || height <= 0) return PF_Err_NONE;
+
+    const A_u_char* input_base = reinterpret_cast<const A_u_char*>(input->data);
+    A_u_char* output_base = reinterpret_cast<A_u_char*>(output->data);
+    const A_long input_rowbytes = input->rowbytes;
+    const A_long output_rowbytes = output->rowbytes;
+
+    // Parameters
+    float thickness = static_cast<float>(params[BORDER_THICKNESS]->u.fs_d.value);
+    PF_Pixel color_param = params[BORDER_COLOR]->u.cd.value;
+    float threshold = static_cast<float>(params[BORDER_THRESHOLD]->u.sd.value) * (PixelTraits<Pixel>::MAX_VAL / 255.0f);
+    int direction = params[BORDER_DIRECTION]->u.pd.value;
+    bool show_line_only = params[BORDER_SHOW_LINE_ONLY]->u.bd.value;
+
+    // Convert color param to target depth
+    Pixel border_color;
+    border_color.alpha = PixelTraits<Pixel>::FromFloat(PixelTraits<Pixel>::MAX_VAL);
+    border_color.red = PixelTraits<Pixel>::FromFloat(color_param.red * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
+    border_color.green = PixelTraits<Pixel>::FromFloat(color_param.green * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
+    border_color.blue = PixelTraits<Pixel>::FromFloat(color_param.blue * (PixelTraits<Pixel>::MAX_VAL / 255.0f));
+
+    // Initialize SDF buffers
+    // We need two buffers: one for distance to "inside" (foreground), one for distance to "outside" (background).
+    // Initialize with INF for opposite type, 0 for same type.
+    std::vector<float> dist_inside(width * height);
+    std::vector<float> dist_outside(width * height);
+
+    // 1. Initialization Pass
+    // Parallelize initialization
+    int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> threads;
+
+    auto init_buffers = [&](int start_y, int end_y) {
+        for (int y = start_y; y < end_y; ++y) {
+            const Pixel* row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
+            for (int x = 0; x < width; ++x) {
+                float alpha = PixelTraits<Pixel>::ToFloat(row[x].alpha);
+                bool is_inside = alpha > threshold;
+                
+                int idx = y * width + x;
+                if (is_inside) {
+                    dist_inside[idx] = 0.0f;
+                    dist_outside[idx] = INF_DIST;
+                } else {
+                    dist_inside[idx] = INF_DIST;
+                    dist_outside[idx] = 0.0f;
+                }
+            }
+        }
+    };
+
+    int rows_per_thread = (height + num_threads - 1) / num_threads;
+    for (int i = 0; i < num_threads; ++i) {
+        int start = i * rows_per_thread;
+        int end = std::min(start + rows_per_thread, height);
+        if (start < end) threads.emplace_back(init_buffers, start, end);
+    }
+    for (auto& t : threads) t.join();
+    threads.clear();
+
+    // 2. EDT Pass 1: Horizontal
+    // Process each row independently
+    auto edt_horizontal = [&](int start_y, int end_y) {
+        std::vector<float> row_buf(width);
+        for (int y = start_y; y < end_y; ++y) {
+            // Inside
+            for(int x=0; x<width; ++x) row_buf[x] = dist_inside[y * width + x];
+            EDT_1D(row_buf, width);
+            for(int x=0; x<width; ++x) dist_inside[y * width + x] = row_buf[x];
+
+            // Outside
+            for(int x=0; x<width; ++x) row_buf[x] = dist_outside[y * width + x];
+            EDT_1D(row_buf, width);
+            for(int x=0; x<width; ++x) dist_outside[y * width + x] = row_buf[x];
+        }
+    };
+
+    for (int i = 0; i < num_threads; ++i) {
+        int start = i * rows_per_thread;
+        int end = std::min(start + rows_per_thread, height);
+        if (start < end) threads.emplace_back(edt_horizontal, start, end);
+    }
+    for (auto& t : threads) t.join();
+    threads.clear();
+
+    // 3. EDT Pass 2: Vertical
+    // Process each column independently
+    // Need to transpose or just stride? Striding is bad for cache, but for EDT_1D we need a vector.
+    // Let's copy column to vector, process, copy back.
+    
+    int cols_per_thread = (width + num_threads - 1) / num_threads;
+    auto edt_vertical = [&](int start_x, int end_x) {
+        std::vector<float> col_buf(height);
+        for (int x = start_x; x < end_x; ++x) {
+            // Inside
+            for(int y=0; y<height; ++y) col_buf[y] = dist_inside[y * width + x];
+            EDT_1D(col_buf, height);
+            for(int y=0; y<height; ++y) dist_inside[y * width + x] = col_buf[y];
+
+            // Outside
+            for(int y=0; y<height; ++y) col_buf[y] = dist_outside[y * width + x];
+            EDT_1D(col_buf, height);
+            for(int y=0; y<height; ++y) dist_outside[y * width + x] = col_buf[y];
+        }
+    };
+
+    for (int i = 0; i < num_threads; ++i) {
+        int start = i * cols_per_thread;
+        int end = std::min(start + cols_per_thread, width);
+        if (start < end) threads.emplace_back(edt_vertical, start, end);
+    }
+    for (auto& t : threads) t.join();
+    threads.clear();
+
+    // 4. Render Pass
+    auto render_rows = [&](int start_y, int end_y) {
+        for (int y = start_y; y < end_y; ++y) {
+            Pixel* out_row = reinterpret_cast<Pixel*>(output_base + y * output_rowbytes);
+            const Pixel* in_row = reinterpret_cast<const Pixel*>(input_base + y * input_rowbytes);
+            
+            for (int x = 0; x < width; ++x) {
+                int idx = y * width + x;
+                float d_in = std::sqrt(dist_inside[idx]);
+                float d_out = std::sqrt(dist_outside[idx]);
+                
+                // Signed distance: negative inside, positive outside
+                // But here: d_in is 0 inside, >0 outside (distance to nearest inside pixel)
+                // Wait, dist_inside initialized to 0 inside. So d_in is distance FROM inside set?
+                // No, EDT computes distance to nearest 0.
+                // If inside pixels are 0, then d_in is distance to nearest inside pixel.
+                // So inside the object, d_in is 0. Outside, it increases.
+                
+                // We want distance to the EDGE.
+                // Edge is where transition happens.
+                // d_out: distance to nearest outside pixel. Inside object, it increases. Outside, it is 0.
+                
+                // SDF = d_in - d_out?
+                // Inside: d_in = 0, d_out > 0. SDF = -d_out (negative inside).
+                // Outside: d_in > 0, d_out = 0. SDF = d_in (positive outside).
+                // Correct.
+                
+                float sdf = d_in - d_out;
+                
+                // Adjust SDF based on direction
+                // Thickness T.
+                // Both: -T/2 to T/2.
+                // Inside: -T to 0.
+                // Outside: 0 to T.
+                
+                float alpha_factor = 0.0f;
+                float aa_width = 1.0f; // 1 pixel AA
+                
+                if (direction == DIRECTION_BOTH) {
+                    // Border is centered at 0. Width T.
+                    // Range [-T/2, T/2].
+                    // Distance from center of border: abs(sdf).
+                    // Coverage = 1 - smoothstep(T/2 - 0.5, T/2 + 0.5, abs(sdf))
+                    float half_t = thickness * 0.5f;
+                    float d = std::abs(sdf);
+                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
+                } else if (direction == DIRECTION_INSIDE) {
+                    // Border from -T to 0.
+                    // We want 1 when sdf in [-T, 0].
+                    // Distance from center (-T/2): abs(sdf - (-T/2)) = abs(sdf + T/2)
+                    // Same logic as Both but shifted.
+                    float half_t = thickness * 0.5f;
+                    float d = std::abs(sdf + half_t);
+                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
+                } else { // Outside
+                    // Border from 0 to T.
+                    // Center T/2.
+                    float half_t = thickness * 0.5f;
+                    float d = std::abs(sdf - half_t);
+                    alpha_factor = 1.0f - Clamp((d - half_t + 0.5f), 0.0f, 1.0f);
+                }
+
+                // Composite
+                // If show_line_only, just show border color * alpha_factor.
+                // Else, composite border over input.
+                
+                Pixel p_in = in_row[x];
+                Pixel p_out;
+                
+                float border_a = PixelTraits<Pixel>::ToFloat(border_color.alpha) * alpha_factor;
+                
+                if (show_line_only) {
+                    p_out.red = border_color.red;
+                    p_out.green = border_color.green;
+                    p_out.blue = border_color.blue;
+                    p_out.alpha = PixelTraits<Pixel>::FromFloat(border_a);
+                } else {
+                    // Simple alpha blending: Border over Input
+                    // out = border * border_a + input * (1 - border_a)
+                    // Note: Pre-multiplied alpha handling might be needed if AE expects it.
+                    // Assuming straight alpha for simplicity or standard AE compositing.
+                    // AE usually uses pre-multiplied alpha.
+                    // If pre-multiplied:
+                    // out.a = border.a + input.a * (1 - border.a)
+                    // out.rgb = border.rgb + input.rgb * (1 - border.a)
+                    // But border_color from param is usually straight.
+                    
+                    float in_a = PixelTraits<Pixel>::ToFloat(p_in.alpha);
+                    float ba_norm = alpha_factor; // 0..1
+                    
+                    // Let's assume straight alpha blending for RGB, then premultiply?
+                    // Or just standard lerp.
+                    
+                    float out_a = in_a + (PixelTraits<Pixel>::MAX_VAL - in_a) * ba_norm; // Approximation
+                    
+                    // Correct over operator:
+                    // out = src + dst * (1 - src_a)
+                    // But here we are painting a stroke.
+                    // Let's just mix based on alpha_factor.
+                    
+                    float r = PixelTraits<Pixel>::ToFloat(border_color.red);
+                    float g = PixelTraits<Pixel>::ToFloat(border_color.green);
+                    float b = PixelTraits<Pixel>::ToFloat(border_color.blue);
+                    
+                    float ir = PixelTraits<Pixel>::ToFloat(p_in.red);
+                    float ig = PixelTraits<Pixel>::ToFloat(p_in.green);
+                    float ib = PixelTraits<Pixel>::ToFloat(p_in.blue);
+                    
+                    p_out.red = PixelTraits<Pixel>::FromFloat(r * ba_norm + ir * (1.0f - ba_norm));
+                    p_out.green = PixelTraits<Pixel>::FromFloat(g * ba_norm + ig * (1.0f - ba_norm));
+                    p_out.blue = PixelTraits<Pixel>::FromFloat(b * ba_norm + ib * (1.0f - ba_norm));
+                    p_out.alpha = PixelTraits<Pixel>::FromFloat(std::max(in_a, border_a * PixelTraits<Pixel>::MAX_VAL)); // Max alpha
+                }
+                out_row[x] = p_out;
+            }
+        }
+    };
+
+    for (int i = 0; i < num_threads; ++i) {
+        int start = i * rows_per_thread;
+        int end = std::min(start + rows_per_thread, height);
+        if (start < end) threads.emplace_back(render_rows, start, end);
+    }
+    for (auto& t : threads) t.join();
+
+    return PF_Err_NONE;
+}
+
+static PF_Err Render(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output) {
+    int bpp = (output->width > 0) ? (output->rowbytes / output->width) : 0;
+    if (bpp == sizeof(PF_PixelFloat)) {
+        return RenderGeneric<PF_PixelFloat>(in_data, out_data, params, output);
+    } else if (bpp == sizeof(PF_Pixel16)) {
+        return RenderGeneric<PF_Pixel16>(in_data, out_data, params, output);
+    } else {
+        return RenderGeneric<PF_Pixel>(in_data, out_data, params, output);
+    }
 }
 
 static PF_Err
-About(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_ParamDef* params[],
-    PF_LayerDef* output)
+About(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output)
 {
     AEGP_SuiteHandler suites(in_data->pica_basicP);
-
     suites.ANSICallbacksSuite1()->sprintf(out_data->return_msg,
         "%s v%d.%d\r%s",
         STR(StrID_Name),
@@ -38,782 +364,109 @@ About(
 }
 
 static PF_Err
-GlobalSetup(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_ParamDef* params[],
-    PF_LayerDef* output)
+GlobalSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output)
 {
-    out_data->my_version = PF_VERSION(MAJOR_VERSION,
-        MINOR_VERSION,
-        BUG_VERSION,
-        STAGE_VERSION,
-        BUILD_VERSION);
-
-    out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
-
+    out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
+    out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT;
+    out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
     return PF_Err_NONE;
 }
 
 static PF_Err
-ParamsSetup(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_ParamDef* params[],
-    PF_LayerDef* output)
+ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output)
 {
-    PF_Err        err = PF_Err_NONE;
-    PF_ParamDef    def;
+    PF_Err err = PF_Err_NONE;
+    PF_ParamDef def;
 
     AEFX_CLR_STRUCT(def);
 
-    PF_ADD_FLOAT_SLIDERX(STR(StrID_Thickness_Param_Name),
+    PF_ADD_FLOAT_SLIDERX(
+        "Thickness",
         BORDER_THICKNESS_MIN,
         BORDER_THICKNESS_MAX,
-        0,
-        100,
-        1,
+        BORDER_THICKNESS_MIN,
+        BORDER_THICKNESS_MAX,
+        BORDER_THICKNESS_DFLT,
         PF_Precision_TENTHS,
         0,
         0,
-        THICKNESS_DISK_ID);
+        BORDER_THICKNESS);
 
-    AEFX_CLR_STRUCT(def);
+    PF_ADD_COLOR(
+        "Color",
+        1.0f, 0.0f, 0.0f,
+        BORDER_COLOR);
 
-    def.flags = PF_ParamFlag_NONE;
-    def.u.cd.value.red = 255;
-    def.u.cd.value.green = 0;
-    def.u.cd.value.blue = 0;
-    def.u.cd.value.alpha = 255;
-
-    PF_ADD_COLOR(STR(StrID_Color_Param_Name),
-        def.u.cd.value.red,
-        def.u.cd.value.green,
-        def.u.cd.value.blue,
-        COLOR_DISK_ID);
-
-    AEFX_CLR_STRUCT(def);
-
-    PF_ADD_SLIDER(STR(StrID_Threshold_Param_Name),
+    PF_ADD_FLOAT_SLIDERX(
+        "Threshold",
         BORDER_THRESHOLD_MIN,
         BORDER_THRESHOLD_MAX,
+        BORDER_THRESHOLD_MIN,
+        BORDER_THRESHOLD_MAX,
+        BORDER_THRESHOLD_DFLT,
+        PF_Precision_INTEGER,
         0,
-        255,
         0,
-        THRESHOLD_DISK_ID);
+        BORDER_THRESHOLD);
 
-    AEFX_CLR_STRUCT(def);
-
-    PF_ADD_POPUP(STR(StrID_Direction_Param_Name),
+    PF_ADD_POPUP(
+        "Direction",
         3,
-        DIRECTION_BOTH,
-        "Both Directions|Inside|Outside",
-        DIRECTION_DISK_ID);
+        BORDER_DIRECTION_DFLT,
+        "Both|Inside|Outside",
+        BORDER_DIRECTION);
 
-    AEFX_CLR_STRUCT(def);
-
-    PF_ADD_CHECKBOX(STR(StrID_ShowLineOnly_Param_Name),
-        "Show line only",
+    PF_ADD_CHECKBOX(
+        "Show Line Only",
+        "Show Line Only",
         FALSE,
         0,
-        SHOW_LINE_ONLY_DISK_ID);
+        BORDER_SHOW_LINE_ONLY);
 
     out_data->num_params = BORDER_NUM_PARAMS;
-
-    return err;
-}
-static PF_Boolean
-IsEdgePixel8(
-    PF_EffectWorld* input,
-    A_long         x,
-    A_long         y,
-    A_u_char       threshold,
-    A_long         thickness,
-    A_long         direction)
-{
-    if (thickness <= 0) {
-        return FALSE;
-    }
-
-    A_long effectiveThickness = thickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = (thickness + 1) / 2;
-    }
-
-    PF_Boolean isTransparent = TRUE;
-    PF_Boolean isValidPosition = FALSE;
-
-    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
-        isValidPosition = TRUE;
-        PF_Pixel8* currentPixel = (PF_Pixel8*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel8));
-        isTransparent = (currentPixel->alpha <= threshold);
-    }
-
-    if (!isValidPosition && direction == DIRECTION_INSIDE) {
-        return FALSE;
-    }
-
-    if (isValidPosition) {
-        if ((direction == DIRECTION_INSIDE && isTransparent) ||
-            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-            return FALSE;
-        }
-    }
-
-    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1);
-    PF_Boolean foundEdge = FALSE;
-
-    A_long searchRadius = effectiveThickness + 1;
-
-    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
-            if (dx == 0 && dy == 0) continue;
-
-            A_long distSquared = dx * dx + dy * dy;
-            if (distSquared > effectiveThickness * effectiveThickness) {
-                continue;
-            }
-
-            A_long nx = x + dx;
-            A_long ny = y + dy;
-
-            PF_Boolean neighborIsTransparent = TRUE;
-            PF_Boolean neighborIsValid = FALSE;
-
-            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                neighborIsValid = TRUE;
-                PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
-                neighborIsTransparent = (neighborPixel->alpha <= threshold);
-            }
-
-            if (!isValidPosition && !neighborIsValid) {
-                continue;
-            }
-
-            PF_Boolean isEdge = FALSE;
-
-            switch (direction) {
-            case DIRECTION_BOTH:
-                isEdge = (isTransparent != neighborIsTransparent);
-                break;
-            case DIRECTION_INSIDE:
-                isEdge = (!isTransparent && neighborIsTransparent);
-                break;
-            case DIRECTION_OUTSIDE:
-                isEdge = (isTransparent && !neighborIsTransparent);
-                break;
-            }
-
-            if (isEdge) {
-                if (distSquared < minDistSquared) {
-                    minDistSquared = (float)distSquared;
-                    foundEdge = TRUE;
-                }
-            }
-        }
-    }
-
-    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
-}
-static PF_Boolean
-IsEdgePixel16(
-    PF_EffectWorld* input,
-    A_long         x,
-    A_long         y,
-    A_u_short      threshold,
-    A_long         thickness,
-    A_long         direction)
-{
-    if (thickness <= 0) {
-        return FALSE;
-    }
-
-    A_long effectiveThickness = thickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = (thickness + 1) / 2;
-    }
-
-    PF_Boolean isTransparent = TRUE;
-    PF_Boolean isValidPosition = FALSE;
-
-    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
-        isValidPosition = TRUE;
-        PF_Pixel16* currentPixel = (PF_Pixel16*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel16));
-        isTransparent = (currentPixel->alpha <= threshold);
-    }
-
-    if (!isValidPosition && direction == DIRECTION_INSIDE) {
-        return FALSE;
-    }
-
-    if (isValidPosition) {
-        if ((direction == DIRECTION_INSIDE && isTransparent) ||
-            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-            return FALSE;
-        }
-    }
-
-    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1);
-    PF_Boolean foundEdge = FALSE;
-
-    A_long searchRadius = effectiveThickness + 1;
-
-    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
-            if (dx == 0 && dy == 0) continue;
-
-            A_long distSquared = dx * dx + dy * dy;
-            if (distSquared > effectiveThickness * effectiveThickness) {
-                continue;
-            }
-
-            A_long nx = x + dx;
-            A_long ny = y + dy;
-
-            PF_Boolean neighborIsTransparent = TRUE;
-            PF_Boolean neighborIsValid = FALSE;
-
-            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                neighborIsValid = TRUE;
-                PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
-                neighborIsTransparent = (neighborPixel->alpha <= threshold);
-            }
-
-            if (!isValidPosition && !neighborIsValid) {
-                continue;
-            }
-
-            PF_Boolean isEdge = FALSE;
-
-            switch (direction) {
-            case DIRECTION_BOTH:
-                isEdge = (isTransparent != neighborIsTransparent);
-                break;
-            case DIRECTION_INSIDE:
-                isEdge = (!isTransparent && neighborIsTransparent);
-                break;
-            case DIRECTION_OUTSIDE:
-                isEdge = (isTransparent && !neighborIsTransparent);
-                break;
-            }
-
-            if (isEdge) {
-                if (distSquared < minDistSquared) {
-                    minDistSquared = (float)distSquared;
-                    foundEdge = TRUE;
-                }
-            }
-        }
-    }
-
-    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
-}
-
-static PF_Err
-GenerateDistanceField(
-    PF_EffectWorld* input,
-    A_u_char threshold8,
-    A_u_short threshold16,
-    A_long direction,
-    std::vector<float>& distanceField,
-    A_long width,
-    A_long height,
-    A_long offsetX,
-    A_long offsetY)
-{
-    PF_Err err = PF_Err_NONE;
-
-    const float MAX_DISTANCE = FLT_MAX;
-    distanceField.resize(width * height, MAX_DISTANCE);
-
-    std::vector<EdgePoint> edgePoints;
-    edgePoints.reserve(width + height);
-
-    for (A_long y = 0; y < height; y++) {
-        for (A_long x = 0; x < width; x++) {
-            A_long inX = x - offsetX;
-            A_long inY = y - offsetY;
-
-            if (inX < -1 || inY < -1 || inX > input->width || inY > input->height) {
-                continue;
-            }
-
-            bool isTransparent = true;
-            bool isValidPosition = false;
-
-            if (inX >= 0 && inY >= 0 && inX < input->width && inY < input->height) {
-                isValidPosition = true;
-                if (PF_WORLD_IS_DEEP(input)) {
-                    PF_Pixel16* pixel = (PF_Pixel16*)((char*)input->data + inY * input->rowbytes + inX * sizeof(PF_Pixel16));
-                    isTransparent = (pixel->alpha <= threshold16);
-                }
-                else {
-                    PF_Pixel8* pixel = (PF_Pixel8*)((char*)input->data + inY * input->rowbytes + inX * sizeof(PF_Pixel8));
-                    isTransparent = (pixel->alpha <= threshold8);
-                }
-            }
-
-            if (!isValidPosition && direction == DIRECTION_INSIDE) {
-                continue;
-            }
-
-            if (isValidPosition) {
-                if ((direction == DIRECTION_INSIDE && isTransparent) ||
-                    (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-                    continue;
-                }
-            }
-
-            bool foundEdge = false;
-
-            const int dx[4] = { 1, 0, -1, 0 };
-            const int dy[4] = { 0, 1, 0, -1 };
-
-            for (int i = 0; i < 4; i++) {
-                A_long nx = inX + dx[i];
-                A_long ny = inY + dy[i];
-
-                bool neighborTransparent = true;
-                bool neighborIsValid = false;
-
-                if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                    neighborIsValid = true;
-                    if (PF_WORLD_IS_DEEP(input)) {
-                        PF_Pixel16* neighbor = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
-                        neighborTransparent = (neighbor->alpha <= threshold16);
-                    }
-                    else {
-                        PF_Pixel8* neighbor = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
-                        neighborTransparent = (neighbor->alpha <= threshold8);
-                    }
-                }
-
-                if (!isValidPosition && !neighborIsValid) {
-                    continue;
-                }
-
-                bool isEdge = false;
-
-                switch (direction) {
-                case DIRECTION_BOTH:
-                    isEdge = (isTransparent != neighborTransparent);
-                    break;
-                case DIRECTION_INSIDE:
-                    isEdge = (!isTransparent && neighborTransparent);
-                    break;
-                case DIRECTION_OUTSIDE:
-                    isEdge = (isTransparent && !neighborTransparent);
-                    break;
-                }
-
-                if (isEdge) {
-                    foundEdge = true;
-                    break;
-                }
-            }
-
-            if (foundEdge) {
-                EdgePoint ep = { x, y, isTransparent };
-                edgePoints.push_back(ep);
-                distanceField[y * width + x] = 0.0f;
-            }
-        }
-    }
-
-    if (edgePoints.empty()) {
-        return err;
-    }
-
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-    for (int i = 0; i < edgePoints.size(); i++) {
-        EdgePoint& ep = edgePoints[i];
-
-        const int regionSize = 50;
-
-        for (A_long dy = -regionSize; dy <= regionSize; dy++) {
-            for (A_long dx = -regionSize; dx <= regionSize; dx++) {
-                A_long nx = ep.x + dx;
-                A_long ny = ep.y + dy;
-
-                if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
-                    continue;
-                }
-
-                float distSq = dx * dx + dy * dy;
-
-                if (distSq > regionSize * regionSize) {
-                    continue;
-                }
-
-                unsigned int index = ny * width + nx;
-#ifdef _WIN32
-#pragma omp critical
-#endif
-                {
-                    if (distSq < distanceField[index]) {
-                        distanceField[index] = distSq;
-                    }
-                }
-            }
-        }
-    }
-
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-    for (A_long i = 0; i < width * height; i++) {
-        if (distanceField[i] < MAX_DISTANCE) {
-            distanceField[i] = sqrtf(distanceField[i]);
-        }
-        else {
-            distanceField[i] = -1.0f;
-        }
-    }
-
-    return err;
-}
-static PF_Err
-PreRender(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_PreRenderExtra* extra)
-{
-    PF_Err err = PF_Err_NONE;
-    PF_RenderRequest req = extra->input->output_request;
-    PF_CheckoutResult in_result;
-
-    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
-
-    PF_ParamDef thickness_param;
-    AEFX_CLR_STRUCT(thickness_param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &thickness_param));
-
-    PF_ParamDef direction_param;
-    AEFX_CLR_STRUCT(direction_param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_DIRECTION, in_data->current_time, in_data->time_step, in_data->time_scale, &direction_param));
-
-    PF_FpLong thickness = thickness_param.u.fs_d.value;
-    A_long direction = direction_param.u.pd.value;
-
-    float pixelThickness;
-    if (thickness <= 0.0f) {
-        pixelThickness = 0.0f;
-    }
-    else if (thickness <= 10.0f) {
-        pixelThickness = thickness;
-    }
-    else {
-        float normalizedThickness = (thickness - 10.0f) / 90.0f;
-        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
-    }
-
-    float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
-    float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
-    float resolution_factor = MIN(downsize_x, downsize_y);
-
-    float effectiveThickness = pixelThickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = pixelThickness / 2.0f;
-    }
-
-    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 5;
-
-    extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
-
-    PF_Rect request_rect = req.rect;
-
-    extra->output->result_rect = in_result.result_rect;
-
-    extra->output->result_rect.left = MAX(request_rect.left, in_result.result_rect.left - borderExpansion);
-    extra->output->result_rect.top = MAX(request_rect.top, in_result.result_rect.top - borderExpansion);
-    extra->output->result_rect.right = MIN(request_rect.right, in_result.result_rect.right + borderExpansion);
-    extra->output->result_rect.bottom = MIN(request_rect.bottom, in_result.result_rect.bottom + borderExpansion);
-
-    extra->output->max_result_rect = in_result.max_result_rect;
-    extra->output->max_result_rect.left = MAX(request_rect.left, in_result.max_result_rect.left - borderExpansion);
-    extra->output->max_result_rect.top = MAX(request_rect.top, in_result.max_result_rect.top - borderExpansion);
-    extra->output->max_result_rect.right = MIN(request_rect.right, in_result.max_result_rect.right + borderExpansion);
-    extra->output->max_result_rect.bottom = MIN(request_rect.bottom, in_result.max_result_rect.bottom + borderExpansion);
-
-    PF_CHECKIN_PARAM(in_data, &thickness_param);
-    PF_CHECKIN_PARAM(in_data, &direction_param);
-
-    return err;
-}
-static PF_Err
-SmartRender(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_SmartRenderExtra* extra)
-{
-    PF_Err err = PF_Err_NONE;
-    AEGP_SuiteHandler suites(in_data->pica_basicP);
-
-    A_long checkout_id = (A_long)(intptr_t)extra->input->pre_render_data;
-
-    PF_EffectWorld* input = NULL;
-    PF_EffectWorld* output = NULL;
-
-    ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, checkout_id, &input));
-    if (err) return err;
-
-    ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
-    if (err) return err;
-
-    PF_FpLong thickness = BORDER_THICKNESS_DFLT;
-    PF_Pixel8 color = { 255, 0, 0, 255 };
-    A_u_char threshold = BORDER_THRESHOLD_DFLT;
-    A_long direction = BORDER_DIRECTION_DFLT;
-    PF_Boolean showLineOnly = FALSE;
-
-    PF_ParamDef param;
-
-    AEFX_CLR_STRUCT(param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) thickness = param.u.fs_d.value;
-    PF_CHECKIN_PARAM(in_data, &param);
-
-    AEFX_CLR_STRUCT(param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_COLOR, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) color = param.u.cd.value;
-    PF_CHECKIN_PARAM(in_data, &param);
-
-    AEFX_CLR_STRUCT(param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THRESHOLD, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) threshold = (A_u_char)param.u.sd.value;
-    PF_CHECKIN_PARAM(in_data, &param);
-
-    AEFX_CLR_STRUCT(param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_DIRECTION, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) direction = param.u.pd.value;
-    PF_CHECKIN_PARAM(in_data, &param);
-
-    AEFX_CLR_STRUCT(param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_SHOW_LINE_ONLY, in_data->current_time, in_data->time_step, in_data->time_scale, &param));
-    if (!err) showLineOnly = param.u.bd.value;
-    PF_CHECKIN_PARAM(in_data, &param);
-
-    float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
-    float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
-    float resolution_factor = MIN(downsize_x, downsize_y);
-
-    float pixelThickness;
-    if (thickness <= 0.0f) {
-        pixelThickness = 0.0f;
-    }
-    else if (thickness <= 10.0f) {
-        pixelThickness = thickness;
-    }
-    else {
-        float normalizedThickness = (thickness - 10.0f) / 90.0f;
-        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
-    }
-
-    A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
-
-    if (input && output) {
-        // STEP 1: Clear the output buffer to transparency
-        if (PF_WORLD_IS_DEEP(output)) {
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-                for (A_long x = 0; x < output->width; x++) {
-                    outData[x].alpha = 0;
-                    outData[x].red = 0;
-                    outData[x].green = 0;
-                    outData[x].blue = 0;
-                }
-            }
-        }
-        else {
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-                for (A_long x = 0; x < output->width; x++) {
-                    outData[x].alpha = 0;
-                    outData[x].red = 0;
-                    outData[x].green = 0;
-                    outData[x].blue = 0;
-                }
-            }
-        }
-
-        // STEP 2: Copy the source layer if not "show line only"
-        if (!showLineOnly) {
-            A_long offsetX = input->origin_x - output->origin_x;
-            A_long offsetY = input->origin_y - output->origin_y;
-
-            if (PF_WORLD_IS_DEEP(output)) {
-                for (A_long y = 0; y < input->height; y++) {
-                    A_long outY = y + offsetY;
-
-                    if (outY < 0 || outY >= output->height) continue;
-
-                    PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-
-                    for (A_long x = 0; x < input->width; x++) {
-                        A_long outX = x + offsetX;
-
-                        if (outX < 0 || outX >= output->width) continue;
-
-                        outData[outX] = inData[x];
-                    }
-                }
-            }
-            else {
-                for (A_long y = 0; y < input->height; y++) {
-                    A_long outY = y + offsetY;
-
-                    if (outY < 0 || outY >= output->height) continue;
-
-                    PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-
-                    for (A_long x = 0; x < input->width; x++) {
-                        A_long outX = x + offsetX;
-
-                        if (outX < 0 || outX >= output->width) continue;
-
-                        outData[outX] = inData[x];
-                    }
-                }
-            }
-        }
-
-        // STEP 3: Draw the border
-        A_long search_margin = thicknessInt + 5;
-        A_long search_left = -search_margin;
-        A_long search_top = -search_margin;
-        A_long search_right = input->width + search_margin;
-        A_long search_bottom = input->height + search_margin;
-
-        A_long offsetX = input->origin_x - output->origin_x;
-        A_long offsetY = input->origin_y - output->origin_y;
-
-        if (PF_WORLD_IS_DEEP(output)) {
-            A_u_short threshold16 = threshold * 257;
-            PF_Pixel16 edge_color;
-
-            edge_color.alpha = PF_MAX_CHAN16;
-            edge_color.red = PF_BYTE_TO_CHAR(color.red);
-            edge_color.green = PF_BYTE_TO_CHAR(color.green);
-            edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
-
-            for (A_long y = search_top; y < search_bottom; y++) {
-                for (A_long x = search_left; x < search_right; x++) {
-                    if (IsEdgePixel16(input, x, y, threshold16, thicknessInt, direction)) {
-                        A_long outX = x + offsetX;
-                        A_long outY = y + offsetY;
-
-                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
-                            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-                            outData[outX] = edge_color;
-                        }
-                    }
-                }
-            }
-        }
-        else {
-            for (A_long y = search_top; y < search_bottom; y++) {
-                for (A_long x = search_left; x < search_right; x++) {
-                    if (IsEdgePixel8(input, x, y, threshold, thicknessInt, direction)) {
-                        A_long outX = x + offsetX;
-                        A_long outY = y + offsetY;
-
-                        if (outX >= 0 && outX < output->width && outY >= 0 && outY < output->height) {
-                            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-                            outData[outX].alpha = PF_MAX_CHAN8;
-                            outData[outX].red = color.red;
-                            outData[outX].green = color.green;
-                            outData[outX].blue = color.blue;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    ERR(extra->cb->checkin_layer_pixels(in_data->effect_ref, checkout_id));
-
-    return err;
-}
-
-static PF_Err
-Render(
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_ParamDef* params[],
-    PF_LayerDef* output)
-{
-    PF_Err err = PF_Err_NONE;
-    return err;
+    return PF_Err_NONE;
 }
 
 extern "C" DllExport
-PF_Err PluginDataEntryFunction2(
-    PF_PluginDataPtr inPtr,
+PF_Err PluginDataEntryFunction2(PF_PluginDataPtr inPtr,
     PF_PluginDataCB2 inPluginDataCallBackPtr,
-    SPBasicSuite* inSPBasicSuitePtr,
+    SPBasicSuite * inSPBasicSuitePtr,
     const char* inHostName,
     const char* inHostVersion)
 {
     PF_Err result = PF_Err_INVALID_CALLBACK;
-
     result = PF_REGISTER_EFFECT_EXT2(
         inPtr,
         inPluginDataCallBackPtr,
-        "Border",
-        "ADBE Border",
-        "Border",
+        "Border", // Name
+        "Border", // Match Name
+        "Ae_Plugins", // Category
         AE_RESERVED_INFO,
         "EffectMain",
-        "https://github.com/rebuildup/Ae_Border");
-
+        "https://github.com/rebuildup/Border");
     return result;
 }
 
-extern "C" DllExport PF_Err
-EffectMain(
-    PF_Cmd            cmd,
-    PF_InData* in_data,
-    PF_OutData* out_data,
-    PF_ParamDef* params[],
-    PF_LayerDef* output,
+extern "C" DllExport
+PF_Err EffectMain(PF_Cmd cmd,
+    PF_InData * in_data,
+    PF_OutData * out_data,
+    PF_ParamDef * params[],
+    PF_LayerDef * output,
     void* extra)
 {
-    PF_Err        err = PF_Err_NONE;
-
+    PF_Err err = PF_Err_NONE;
     try {
         switch (cmd) {
-        case PF_Cmd_ABOUT:
-            err = About(in_data, out_data, params, output);
-            break;
-
-        case PF_Cmd_GLOBAL_SETUP:
-            err = GlobalSetup(in_data, out_data, params, output);
-            break;
-
-        case PF_Cmd_PARAMS_SETUP:
-            err = ParamsSetup(in_data, out_data, params, output);
-            break;
-
-        case PF_Cmd_RENDER:
-            err = Render(in_data, out_data, params, output);
-            break;
-
-        case PF_Cmd_SMART_PRE_RENDER:
-            err = PreRender(in_data, out_data, reinterpret_cast<PF_PreRenderExtra*>(extra));
-            break;
-
-        case PF_Cmd_SMART_RENDER:
-            err = SmartRender(in_data, out_data, reinterpret_cast<PF_SmartRenderExtra*>(extra));
-            break;
+        case PF_Cmd_ABOUT: err = About(in_data, out_data, params, output); break;
+        case PF_Cmd_GLOBAL_SETUP: err = GlobalSetup(in_data, out_data, params, output); break;
+        case PF_Cmd_PARAMS_SETUP: err = ParamsSetup(in_data, out_data, params, output); break;
+        case PF_Cmd_RENDER: err = Render(in_data, out_data, params, output); break;
+        default: break;
         }
     }
-    catch (PF_Err& thrown_err) {
-        err = thrown_err;
+    catch (...) {
+        err = PF_Err_INTERNAL_STRUCT_DAMAGED;
     }
     return err;
 }
