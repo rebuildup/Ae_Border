@@ -389,8 +389,8 @@ PreRender(
 {
     PF_Err err = PF_Err_NONE;
     PF_PreRenderExtra_Local* extra = (PF_PreRenderExtra_Local*)extraP;
-    PF_RenderRequest_Local req = extra->input->output_request;
-    PF_CheckoutResult_Local in_result;
+    PF_RenderRequest req = extra->input->output_request;
+    PF_CheckoutResult in_result;
 
     // Checkout input
     ERR(extra->cb->checkout_layer(in_data->effect_ref,
