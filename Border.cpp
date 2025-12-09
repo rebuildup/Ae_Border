@@ -358,6 +358,9 @@ SmartRender(
 
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
     float thicknessF = static_cast<float>(thicknessInt);
+    // For BOTH we split thickness half inside/outside to match visual width
+    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
+    A_long strokeThicknessInt = (A_long)(strokeThicknessF + 0.5f);
 
     if (input && output) {
         // Calculate offset between input and output
@@ -473,25 +476,33 @@ SmartRender(
                         break;
                     }
 
-                    if (dist > thicknessF + AA_RANGE) continue;
+                    if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                    // Smooth coverage on both inner (edge) and outer (thickness) boundaries
-                    float aInner = smoothstep(0.0f, AA_RANGE, dist);                   // fade in at edge
-                    float aOuter = smoothstep(thicknessF + AA_RANGE, thicknessF, dist); // fade out at far side
+                    float aInner = 1.0f;
+                    if (direction == DIRECTION_OUTSIDE) {
+                        // Outside: ensure no gap at the edge; fade only outward
+                        aInner = 1.0f - smoothstep(0.0f, AA_RANGE, dist);
+                    } else {
+                        // Inside/Both: fade in from the edge
+                        aInner = smoothstep(0.0f, AA_RANGE, dist);
+                    }
+                    float aOuter = smoothstep(strokeThicknessF + AA_RANGE, strokeThicknessF, dist);
                     float coverage = aInner * aOuter;
 
                     PF_Pixel16 src = srcData[x];
                     PF_Pixel16 dst = outData[outX];
 
                     // Blend stroke over existing output (which may already contain source)
-                    dst.red   = (A_u_short)(edge_color.red   * coverage + dst.red   * (1.0f - coverage));
-                    dst.green = (A_u_short)(edge_color.green * coverage + dst.green * (1.0f - coverage));
-                    dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
-
-                    if (direction == DIRECTION_INSIDE) {
-                        dst.alpha = MAX(src.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
-                    } else {
-                        dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
+                    // For OUTSIDE, don't paint over opaque source pixels
+                    if (direction != DIRECTION_OUTSIDE || src.alpha <= threshold16) {
+                        dst.red   = (A_u_short)(edge_color.red   * coverage + dst.red   * (1.0f - coverage));
+                        dst.green = (A_u_short)(edge_color.green * coverage + dst.green * (1.0f - coverage));
+                        dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
+                        if (direction == DIRECTION_INSIDE) {
+                            dst.alpha = MAX(src.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
+                        } else {
+                            dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
+                        }
                     }
 
                     outData[outX] = dst;
@@ -527,23 +538,26 @@ SmartRender(
                         break;
                     }
 
-                    if (dist > thicknessF + AA_RANGE) continue;
+                    if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                    float aInner = smoothstep(0.0f, AA_RANGE, dist);
-                    float aOuter = smoothstep(thicknessF + AA_RANGE, thicknessF, dist);
+                    float aInner = (direction == DIRECTION_OUTSIDE)
+                        ? 1.0f - smoothstep(0.0f, AA_RANGE, dist)
+                        : smoothstep(0.0f, AA_RANGE, dist);
+                    float aOuter = smoothstep(strokeThicknessF + AA_RANGE, strokeThicknessF, dist);
                     float coverage = aInner * aOuter;
 
                     PF_Pixel8 src = srcData[x];
                     PF_Pixel8 dst = outData[outX];
 
-                    dst.red   = (A_u_char)(color.red   * coverage + dst.red   * (1.0f - coverage));
-                    dst.green = (A_u_char)(color.green * coverage + dst.green * (1.0f - coverage));
-                    dst.blue  = (A_u_char)(color.blue  * coverage + dst.blue  * (1.0f - coverage));
-
-                    if (direction == DIRECTION_INSIDE) {
-                        dst.alpha = MAX(src.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
-                    } else {
-                        dst.alpha = MAX(dst.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
+                    if (direction != DIRECTION_OUTSIDE || src.alpha <= threshold) {
+                        dst.red   = (A_u_char)(color.red   * coverage + dst.red   * (1.0f - coverage));
+                        dst.green = (A_u_char)(color.green * coverage + dst.green * (1.0f - coverage));
+                        dst.blue  = (A_u_char)(color.blue  * coverage + dst.blue  * (1.0f - coverage));
+                        if (direction == DIRECTION_INSIDE) {
+                            dst.alpha = MAX(src.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
+                        } else {
+                            dst.alpha = MAX(dst.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
+                        }
                     }
 
                     outData[outX] = dst;
