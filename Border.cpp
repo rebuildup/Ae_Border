@@ -44,11 +44,8 @@ GlobalSetup(
     PF_ParamDef* params[],
     PF_LayerDef* output)
 {
-    out_data->my_version = PF_VERSION(MAJOR_VERSION,
-        MINOR_VERSION,
-        BUG_VERSION,
-        STAGE_VERSION,
-        BUILD_VERSION);
+    // Use the same packed constant as the PiPL to avoid version mismatch warnings.
+    out_data->my_version = BORDER_VERSION_VALUE;
 
     out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
     out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
