@@ -1,4 +1,5 @@
 #include "AEConfig.h"
+#include "AE_Effect.h"       // for PF_OutFlag macros & PF_VERSION
 #include "AE_EffectVers.h"
 #include "Border_Version.h"
 
@@ -50,10 +51,10 @@ resource 'PiPL' (16000) {
         },
         /* [10] */
         AE_Effect_Global_OutFlags {
-            0x02000440
+            PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT
         },
         AE_Effect_Global_OutFlags_2 {
-            0x08000400
+            PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING
         },
         /* [11] */
         AE_Effect_Match_Name {
