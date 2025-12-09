@@ -1,5 +1,6 @@
 #include "AEConfig.h"
 #include "AE_Effect.h"       // for PF_OutFlag macros
+#include "AE_EffectVers.h"   // for PF_PLUG_IN_VERSION/PF_PLUG_IN_SUBVERS
 #include "Border_Version.h"
 
 #ifndef AE_OS_WIN
@@ -36,10 +37,7 @@ resource 'PiPL' (16000) {
             0
         },
         /* [7] */
-        AE_Effect_Spec_Version {
-            PF_PLUG_IN_VERSION,
-            PF_PLUG_IN_SUBVERS
-        },
+        AE_Effect_Spec_Version { PF_PLUG_IN_VERSION, PF_PLUG_IN_SUBVERS },
         /* [8] */
         AE_Effect_Version { BORDER_VERSION_VALUE },
         /* [9] */
