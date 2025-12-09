@@ -6,6 +6,8 @@
 
 #ifdef _WIN32
 #include <omp.h>
+#undef min
+#undef max
 #endif
 
 struct EdgePoint {
