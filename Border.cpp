@@ -357,6 +357,7 @@ SmartRender(
     }
 
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
+    float thicknessF = static_cast<float>(thicknessInt);
 
     if (input && output) {
         // Calculate offset between input and output
@@ -472,11 +473,11 @@ SmartRender(
                         break;
                     }
 
-                    if (dist > thicknessInt + AA_RANGE) continue;
+                    if (dist > thicknessF + AA_RANGE) continue;
 
                     // Smooth coverage on both inner (edge) and outer (thickness) boundaries
                     float aInner = smoothstep(0.0f, AA_RANGE, dist);                   // fade in at edge
-                    float aOuter = smoothstep(thicknessInt + AA_RANGE, thicknessInt, dist); // fade out at far side
+                    float aOuter = smoothstep(thicknessF + AA_RANGE, thicknessF, dist); // fade out at far side
                     float coverage = aInner * aOuter;
 
                     PF_Pixel16 src = srcData[x];
@@ -526,10 +527,10 @@ SmartRender(
                         break;
                     }
 
-                    if (dist > thicknessInt + AA_RANGE) continue;
+                    if (dist > thicknessF + AA_RANGE) continue;
 
                     float aInner = smoothstep(0.0f, AA_RANGE, dist);
-                    float aOuter = smoothstep(thicknessInt + AA_RANGE, thicknessInt, dist);
+                    float aOuter = smoothstep(thicknessF + AA_RANGE, thicknessF, dist);
                     float coverage = aInner * aOuter;
 
                     PF_Pixel8 src = srcData[x];
