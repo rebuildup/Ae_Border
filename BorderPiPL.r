@@ -1,5 +1,6 @@
 #include "AEConfig.h"
 #include "AE_EffectVers.h"
+#include "Border_Version.h"
 
 #ifndef AE_OS_WIN
     #include <AE_General.r>
@@ -41,7 +42,7 @@ resource 'PiPL' (16000) {
         },
         /* [8] */
         AE_Effect_Version {
-            528385    /* 1.0.0 */
+            BORDER_VERSION_VALUE
         },
         /* [9] */
         AE_Effect_Info_Flags {

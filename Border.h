@@ -33,13 +33,7 @@
 #include "AEGP_SuiteHandler.h"
 
 #include "Border_Strings.h"
-
-/* Versioning information */
-#define	MAJOR_VERSION	1
-#define	MINOR_VERSION	0
-#define	BUG_VERSION		0
-#define	STAGE_VERSION	PF_Stage_DEVELOP
-#define	BUILD_VERSION	1
+#include "Border_Version.h"
 
 typedef unsigned char		u_char;
 typedef unsigned short		u_short;
