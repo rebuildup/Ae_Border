@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <cfloat>
+#include <limits>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -120,357 +121,95 @@ ParamsSetup(
 
     return err;
 }
-static PF_Boolean
-IsEdgePixel8(
-    PF_EffectWorld* input,
-    A_long         x,
-    A_long         y,
-    A_u_char       threshold,
-    A_long         thickness,
-    A_long         direction)
-{
-    if (thickness <= 0) {
-        return FALSE;
-    }
-
-    A_long effectiveThickness = thickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = (thickness + 1) / 2;
-    }
-
-    PF_Boolean isTransparent = TRUE;
-    PF_Boolean isValidPosition = FALSE;
-
-    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
-        isValidPosition = TRUE;
-        PF_Pixel8* currentPixel = (PF_Pixel8*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel8));
-        isTransparent = (currentPixel->alpha <= threshold);
-    }
-
-    if (!isValidPosition && direction == DIRECTION_INSIDE) {
-        return FALSE;
-    }
-
-    if (isValidPosition) {
-        if ((direction == DIRECTION_INSIDE && isTransparent) ||
-            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-            return FALSE;
-        }
-    }
-
-    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1);
-    PF_Boolean foundEdge = FALSE;
-
-    A_long searchRadius = effectiveThickness + 1;
-
-    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
-            if (dx == 0 && dy == 0) continue;
-
-            A_long distSquared = dx * dx + dy * dy;
-            if (distSquared > effectiveThickness * effectiveThickness) {
-                continue;
-            }
-
-            A_long nx = x + dx;
-            A_long ny = y + dy;
-
-            PF_Boolean neighborIsTransparent = TRUE;
-            PF_Boolean neighborIsValid = FALSE;
-
-            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                neighborIsValid = TRUE;
-                PF_Pixel8* neighborPixel = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
-                neighborIsTransparent = (neighborPixel->alpha <= threshold);
-            }
-
-            if (!isValidPosition && !neighborIsValid) {
-                continue;
-            }
-
-            PF_Boolean isEdge = FALSE;
-
-            switch (direction) {
-            case DIRECTION_BOTH:
-                isEdge = (isTransparent != neighborIsTransparent);
-                break;
-            case DIRECTION_INSIDE:
-                isEdge = (!isTransparent && neighborIsTransparent);
-                break;
-            case DIRECTION_OUTSIDE:
-                isEdge = (isTransparent && !neighborIsTransparent);
-                break;
-            }
-
-            if (isEdge) {
-                if (distSquared < minDistSquared) {
-                    minDistSquared = (float)distSquared;
-                    foundEdge = TRUE;
-                }
-            }
-        }
-    }
-
-    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
-}
-static PF_Boolean
-IsEdgePixel16(
-    PF_EffectWorld* input,
-    A_long         x,
-    A_long         y,
-    A_u_short      threshold,
-    A_long         thickness,
-    A_long         direction)
-{
-    if (thickness <= 0) {
-        return FALSE;
-    }
-
-    A_long effectiveThickness = thickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = (thickness + 1) / 2;
-    }
-
-    PF_Boolean isTransparent = TRUE;
-    PF_Boolean isValidPosition = FALSE;
-
-    if (x >= 0 && y >= 0 && x < input->width && y < input->height) {
-        isValidPosition = TRUE;
-        PF_Pixel16* currentPixel = (PF_Pixel16*)((char*)input->data + y * input->rowbytes + x * sizeof(PF_Pixel16));
-        isTransparent = (currentPixel->alpha <= threshold);
-    }
-
-    if (!isValidPosition && direction == DIRECTION_INSIDE) {
-        return FALSE;
-    }
-
-    if (isValidPosition) {
-        if ((direction == DIRECTION_INSIDE && isTransparent) ||
-            (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-            return FALSE;
-        }
-    }
-
-    float minDistSquared = (float)(effectiveThickness * effectiveThickness + 1);
-    PF_Boolean foundEdge = FALSE;
-
-    A_long searchRadius = effectiveThickness + 1;
-
-    for (A_long dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (A_long dx = -searchRadius; dx <= searchRadius; dx++) {
-            if (dx == 0 && dy == 0) continue;
-
-            A_long distSquared = dx * dx + dy * dy;
-            if (distSquared > effectiveThickness * effectiveThickness) {
-                continue;
-            }
-
-            A_long nx = x + dx;
-            A_long ny = y + dy;
-
-            PF_Boolean neighborIsTransparent = TRUE;
-            PF_Boolean neighborIsValid = FALSE;
-
-            if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                neighborIsValid = TRUE;
-                PF_Pixel16* neighborPixel = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
-                neighborIsTransparent = (neighborPixel->alpha <= threshold);
-            }
-
-            if (!isValidPosition && !neighborIsValid) {
-                continue;
-            }
-
-            PF_Boolean isEdge = FALSE;
-
-            switch (direction) {
-            case DIRECTION_BOTH:
-                isEdge = (isTransparent != neighborIsTransparent);
-                break;
-            case DIRECTION_INSIDE:
-                isEdge = (!isTransparent && neighborIsTransparent);
-                break;
-            case DIRECTION_OUTSIDE:
-                isEdge = (isTransparent && !neighborIsTransparent);
-                break;
-            }
-
-            if (isEdge) {
-                if (distSquared < minDistSquared) {
-                    minDistSquared = (float)distSquared;
-                    foundEdge = TRUE;
-                }
-            }
-        }
-    }
-
-    return (foundEdge && minDistSquared <= (effectiveThickness * effectiveThickness));
-}
-
+// Fast 3-4 chamfer distance transform (integer, scaled by 10) to compute
+// signed distance to the alpha edge. Positive inside opaque region, negative outside.
 static PF_Err
-GenerateDistanceField(
+ComputeSignedDistanceField(
     PF_EffectWorld* input,
     A_u_char threshold8,
     A_u_short threshold16,
-    A_long direction,
-    std::vector<float>& distanceField,
+    std::vector<int>& signedDist, // scaled by 10
     A_long width,
-    A_long height,
-    A_long offsetX,
-    A_long offsetY)
+    A_long height)
 {
-    PF_Err err = PF_Err_NONE;
+    const int INF = std::numeric_limits<int>::max() / 4;
+    signedDist.assign(width * height, 0);
 
-    const float MAX_DISTANCE = FLT_MAX;
-    distanceField.resize(width * height, MAX_DISTANCE);
+    auto idx = [width](A_long x, A_long y) { return y * width + x; };
 
-    std::vector<EdgePoint> edgePoints;
-    edgePoints.reserve(width + height);
+    std::vector<int> distInside(width * height, INF);
+    std::vector<int> distOutside(width * height, INF);
 
-    for (A_long y = 0; y < height; y++) {
-        for (A_long x = 0; x < width; x++) {
-            A_long inX = x - offsetX;
-            A_long inY = y - offsetY;
-
-            if (inX < -1 || inY < -1 || inX > input->width || inY > input->height) {
-                continue;
-            }
-
-            bool isTransparent = true;
-            bool isValidPosition = false;
-
-            if (inX >= 0 && inY >= 0 && inX < input->width && inY < input->height) {
-                isValidPosition = true;
-                if (PF_WORLD_IS_DEEP(input)) {
-                    PF_Pixel16* pixel = (PF_Pixel16*)((char*)input->data + inY * input->rowbytes + inX * sizeof(PF_Pixel16));
-                    isTransparent = (pixel->alpha <= threshold16);
-                }
-                else {
-                    PF_Pixel8* pixel = (PF_Pixel8*)((char*)input->data + inY * input->rowbytes + inX * sizeof(PF_Pixel8));
-                    isTransparent = (pixel->alpha <= threshold8);
-                }
-            }
-
-            if (!isValidPosition && direction == DIRECTION_INSIDE) {
-                continue;
-            }
-
-            if (isValidPosition) {
-                if ((direction == DIRECTION_INSIDE && isTransparent) ||
-                    (direction == DIRECTION_OUTSIDE && !isTransparent)) {
-                    continue;
-                }
-            }
-
-            bool foundEdge = false;
-
-            const int dx[4] = { 1, 0, -1, 0 };
-            const int dy[4] = { 0, 1, 0, -1 };
-
-            for (int i = 0; i < 4; i++) {
-                A_long nx = inX + dx[i];
-                A_long ny = inY + dy[i];
-
-                bool neighborTransparent = true;
-                bool neighborIsValid = false;
-
-                if (nx >= 0 && ny >= 0 && nx < input->width && ny < input->height) {
-                    neighborIsValid = true;
-                    if (PF_WORLD_IS_DEEP(input)) {
-                        PF_Pixel16* neighbor = (PF_Pixel16*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel16));
-                        neighborTransparent = (neighbor->alpha <= threshold16);
-                    }
-                    else {
-                        PF_Pixel8* neighbor = (PF_Pixel8*)((char*)input->data + ny * input->rowbytes + nx * sizeof(PF_Pixel8));
-                        neighborTransparent = (neighbor->alpha <= threshold8);
-                    }
-                }
-
-                if (!isValidPosition && !neighborIsValid) {
-                    continue;
-                }
-
-                bool isEdge = false;
-
-                switch (direction) {
-                case DIRECTION_BOTH:
-                    isEdge = (isTransparent != neighborTransparent);
-                    break;
-                case DIRECTION_INSIDE:
-                    isEdge = (!isTransparent && neighborTransparent);
-                    break;
-                case DIRECTION_OUTSIDE:
-                    isEdge = (isTransparent && !neighborTransparent);
-                    break;
-                }
-
-                if (isEdge) {
-                    foundEdge = true;
-                    break;
-                }
-            }
-
-            if (foundEdge) {
-                EdgePoint ep = { x, y, isTransparent };
-                edgePoints.push_back(ep);
-                distanceField[y * width + x] = 0.0f;
-            }
-        }
-    }
-
-    if (edgePoints.empty()) {
-        return err;
-    }
-
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-    for (int i = 0; i < edgePoints.size(); i++) {
-        EdgePoint& ep = edgePoints[i];
-
-        const int regionSize = 50;
-
-        for (A_long dy = -regionSize; dy <= regionSize; dy++) {
-            for (A_long dx = -regionSize; dx <= regionSize; dx++) {
-                A_long nx = ep.x + dx;
-                A_long ny = ep.y + dy;
-
-                if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
-                    continue;
-                }
-
-                float distSq = static_cast<float>(dx * dx + dy * dy);
-
-                if (distSq > regionSize * regionSize) {
-                    continue;
-                }
-
-                unsigned int index = ny * width + nx;
-#ifdef _WIN32
-#pragma omp critical
-#endif
-                {
-                    if (distSq < distanceField[index]) {
-                        distanceField[index] = distSq;
-                    }
-                }
-            }
-        }
-    }
-
-#ifdef _WIN32
-#pragma omp parallel for
-#endif
-    for (A_long i = 0; i < width * height; i++) {
-        if (distanceField[i] < MAX_DISTANCE) {
-            distanceField[i] = sqrtf(distanceField[i]);
+    auto isSolid = [&](A_long x, A_long y)->bool {
+        if (PF_WORLD_IS_DEEP(input)) {
+            PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
+            return p->alpha > threshold16;
         }
         else {
-            distanceField[i] = -1.0f;
+            PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
+            return p->alpha > threshold8;
+        }
+    };
+
+    for (A_long y = 0; y < height; ++y) {
+        for (A_long x = 0; x < width; ++x) {
+            bool solid = isSolid(x, y);
+            if (solid) {
+                distOutside[idx(x, y)] = 0; // seeds for outside distances
+            }
+            else {
+                distInside[idx(x, y)] = 0;  // seeds for inside distances
+            }
         }
     }
 
-    return err;
+    const int wStraight = 10; // scaled by 10
+    const int wDiag = 14;     // approx sqrt(2)*10
+
+    auto forwardPass = [&](std::vector<int>& dist) {
+        for (A_long y = 0; y < height; ++y) {
+            for (A_long x = 0; x < width; ++x) {
+                int v = dist[idx(x, y)];
+                if (v == 0) continue;
+                int best = v;
+                if (x > 0)                 best = std::min(best, dist[idx(x - 1, y)] + wStraight);
+                if (y > 0)                 best = std::min(best, dist[idx(x, y - 1)] + wStraight);
+                if (x > 0 && y > 0)        best = std::min(best, dist[idx(x - 1, y - 1)] + wDiag);
+                if (x + 1 < width && y > 0)best = std::min(best, dist[idx(x + 1, y - 1)] + wDiag);
+                dist[idx(x, y)] = best;
+            }
+        }
+    };
+
+    auto backwardPass = [&](std::vector<int>& dist) {
+        for (A_long y = height - 1; y >= 0; --y) {
+            for (A_long x = width - 1; x >= 0; --x) {
+                int v = dist[idx(x, y)];
+                int best = v;
+                if (x + 1 < width)          best = std::min(best, dist[idx(x + 1, y)] + wStraight);
+                if (y + 1 < height)         best = std::min(best, dist[idx(x, y + 1)] + wStraight);
+                if (x + 1 < width && y + 1 < height) best = std::min(best, dist[idx(x + 1, y + 1)] + wDiag);
+                if (x > 0 && y + 1 < height) best = std::min(best, dist[idx(x - 1, y + 1)] + wDiag);
+                dist[idx(x, y)] = best;
+            }
+        }
+    };
+
+    forwardPass(distInside);
+    forwardPass(distOutside);
+    backwardPass(distInside);
+    backwardPass(distOutside);
+
+    signedDist.resize(width * height);
+    for (A_long y = 0; y < height; ++y) {
+        for (A_long x = 0; x < width; ++x) {
+            bool solid = isSolid(x, y);
+            int d = solid ? distInside[idx(x, y)] : distOutside[idx(x, y)];
+            signedDist[idx(x, y)] = solid ? d : -d;
+        }
+    }
+
+    return PF_Err_NONE;
 }
 static PF_Err
 PreRender(
@@ -616,11 +355,11 @@ SmartRender(
         A_long offsetX = input->origin_x - output->origin_x;
         A_long offsetY = input->origin_y - output->origin_y;
 
-        // Generate distance field for anti-aliasing
-        std::vector<float> distanceField;
+        // Generate signed distance field (fast chamfer, scaled by 10)
+        std::vector<int> signedDist;
         A_u_short threshold16 = threshold * 257;
-        ERR(GenerateDistanceField(input, threshold, threshold16, direction, distanceField, 
-                                   input->width, input->height, 0, 0));
+        ERR(ComputeSignedDistanceField(input, threshold, threshold16, signedDist,
+            input->width, input->height));
 
         // STEP 1: Clear the output buffer to transparency
         if (PF_WORLD_IS_DEEP(output)) {
@@ -686,108 +425,93 @@ SmartRender(
             }
         }
 
-        // STEP 3: Draw the border with distance-based anti-aliasing
-        A_long search_margin = thicknessInt + 5;
-        A_long search_left = -search_margin;
-        A_long search_top = -search_margin;
-        A_long search_right = input->width + search_margin;
-        A_long search_bottom = input->height + search_margin;
-
-        const float AA_RANGE = 1.0f; // 1 pixel anti-aliasing range
+        // STEP 3: Draw the border using signed distance (fast, O(N))
+        const float AA_RANGE = 1.0f; // 1 pixel smoothing
 
         if (PF_WORLD_IS_DEEP(output)) {
-            A_u_short threshold16 = threshold * 257;
             PF_Pixel16 edge_color;
-
             edge_color.alpha = PF_MAX_CHAN16;
             edge_color.red = PF_BYTE_TO_CHAR(color.red);
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            for (A_long y = search_top; y < search_bottom; y++) {
-                for (A_long x = search_left; x < search_right; x++) {
+            for (A_long y = 0; y < input->height; y++) {
+                A_long outY = y + offsetY;
+                if (outY < 0 || outY >= output->height) continue;
+                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
+                PF_Pixel16* srcData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+
+                for (A_long x = 0; x < input->width; x++) {
                     A_long outX = x + offsetX;
-                    A_long outY = y + offsetY;
+                    if (outX < 0 || outX >= output->width) continue;
 
-                    if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
-                    if (x < 0 || x >= input->width || y < 0 || y >= input->height) continue;
+                    int signed10 = signedDist[y * input->width + x];
+                    int abs10 = signed10 >= 0 ? signed10 : -signed10;
+                    float dist = abs10 * 0.1f;
+                    if (dist > thicknessInt) continue;
 
-                    float dist = distanceField[y * input->width + x];
-                    if (dist < 0.0f || dist > thicknessInt) continue;
+                    // Direction filtering
+                    if (direction == DIRECTION_INSIDE && signed10 <= 0) continue;
+                    if (direction == DIRECTION_OUTSIDE && signed10 >= 0) continue;
 
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-                    PF_Pixel16* srcData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+                    float coverage = (thicknessInt + AA_RANGE - dist) / AA_RANGE;
+                    coverage = MAX(0.0f, MIN(1.0f, coverage));
+
                     PF_Pixel16 src = srcData[x];
-                    bool isTransparent = (src.alpha <= threshold16);
+                    PF_Pixel16 dst = outData[outX];
 
-                    // Calculate blend factor based on distance
-                    float t = 1.0f;
-                    if (dist < AA_RANGE) {
-                        // Inner AA: blend color with original
-                        t = dist / AA_RANGE;
-                    } else if (dist > thicknessInt - AA_RANGE) {
-                        // Outer AA: fade out alpha
-                        t = (thicknessInt - dist) / AA_RANGE;
-                    }
-                    t = MAX(0.0f, MIN(1.0f, t));
+                    // Blend stroke over existing output (which may already contain source)
+                    dst.red   = (A_u_short)(edge_color.red   * coverage + dst.red   * (1.0f - coverage));
+                    dst.green = (A_u_short)(edge_color.green * coverage + dst.green * (1.0f - coverage));
+                    dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
 
-                    if (direction == DIRECTION_INSIDE && !isTransparent) {
-                        // Inside: blend with original color
-                        float blend = t;
-                        outData[outX].red = (A_u_short)(edge_color.red * blend + src.red * (1.0f - blend));
-                        outData[outX].green = (A_u_short)(edge_color.green * blend + src.green * (1.0f - blend));
-                        outData[outX].blue = (A_u_short)(edge_color.blue * blend + src.blue * (1.0f - blend));
-                        outData[outX].alpha = src.alpha;
+                    if (direction == DIRECTION_INSIDE) {
+                        // Keep inside alpha opaque by preserving original
+                        dst.alpha = MAX(src.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
                     } else {
-                        // Outside/Both: fade alpha
-                        outData[outX] = edge_color;
-                        outData[outX].alpha = (A_u_short)(edge_color.alpha * t);
+                        dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
                     }
+
+                    outData[outX] = dst;
                 }
             }
         }
         else {
-            for (A_long y = search_top; y < search_bottom; y++) {
-                for (A_long x = search_left; x < search_right; x++) {
+            for (A_long y = 0; y < input->height; y++) {
+                A_long outY = y + offsetY;
+                if (outY < 0 || outY >= output->height) continue;
+                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
+                PF_Pixel8* srcData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+
+                for (A_long x = 0; x < input->width; x++) {
                     A_long outX = x + offsetX;
-                    A_long outY = y + offsetY;
+                    if (outX < 0 || outX >= output->width) continue;
 
-                    if (outX < 0 || outX >= output->width || outY < 0 || outY >= output->height) continue;
-                    if (x < 0 || x >= input->width || y < 0 || y >= input->height) continue;
+                    int signed10 = signedDist[y * input->width + x];
+                    int abs10 = signed10 >= 0 ? signed10 : -signed10;
+                    float dist = abs10 * 0.1f;
+                    if (dist > thicknessInt) continue;
 
-                    float dist = distanceField[y * input->width + x];
-                    if (dist < 0.0f || dist > thicknessInt) continue;
+                    if (direction == DIRECTION_INSIDE && signed10 <= 0) continue;
+                    if (direction == DIRECTION_OUTSIDE && signed10 >= 0) continue;
 
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-                    PF_Pixel8* srcData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+                    float coverage = (thicknessInt + AA_RANGE - dist) / AA_RANGE;
+                    coverage = MAX(0.0f, MIN(1.0f, coverage));
+
                     PF_Pixel8 src = srcData[x];
-                    bool isTransparent = (src.alpha <= threshold);
+                    PF_Pixel8 dst = outData[outX];
 
-                    // Calculate blend factor based on distance
-                    float t = 1.0f;
-                    if (dist < AA_RANGE) {
-                        // Inner AA: blend color with original
-                        t = dist / AA_RANGE;
-                    } else if (dist > thicknessInt - AA_RANGE) {
-                        // Outer AA: fade out alpha
-                        t = (thicknessInt - dist) / AA_RANGE;
-                    }
-                    t = MAX(0.0f, MIN(1.0f, t));
+                    dst.red   = (A_u_char)(color.red   * coverage + dst.red   * (1.0f - coverage));
+                    dst.green = (A_u_char)(color.green * coverage + dst.green * (1.0f - coverage));
+                    dst.blue  = (A_u_char)(color.blue  * coverage + dst.blue  * (1.0f - coverage));
 
-                    if (direction == DIRECTION_INSIDE && !isTransparent) {
-                        // Inside: blend with original color
-                        float blend = t;
-                        outData[outX].red = (A_u_char)(color.red * blend + src.red * (1.0f - blend));
-                        outData[outX].green = (A_u_char)(color.green * blend + src.green * (1.0f - blend));
-                        outData[outX].blue = (A_u_char)(color.blue * blend + src.blue * (1.0f - blend));
-                        outData[outX].alpha = src.alpha;
+                    if (direction == DIRECTION_INSIDE) {
+                        dst.alpha = MAX(src.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
                     } else {
-                        // Outside/Both: fade alpha
-                        outData[outX].red = color.red;
-                        outData[outX].green = color.green;
-                        outData[outX].blue = color.blue;
-                        outData[outX].alpha = (A_u_char)(PF_MAX_CHAN8 * t);
+                        dst.alpha = MAX(dst.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
                     }
+
+                    outData[outX] = dst;
                 }
             }
         }
