@@ -3,12 +3,6 @@
 #include "AE_EffectVers.h"
 #include "Border_Version.h"
 
-// Precompute flag values for the PiPL expression parser.
-enum {
-    BORDER_OUTFLAGS  = (PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT),
-    BORDER_OUTFLAGS2 = (PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING)
-};
-
 #ifndef AE_OS_WIN
     #include <AE_General.r>
 #endif
@@ -56,8 +50,10 @@ resource 'PiPL' (16000) {
             0
         },
         /* [10] */
-        AE_Effect_Global_OutFlags { BORDER_OUTFLAGS },
-        AE_Effect_Global_OutFlags_2 { BORDER_OUTFLAGS2 },
+        // These literals equal PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT
+        AE_Effect_Global_OutFlags  { 0x02000440 },
+        // These literals equal PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING
+        AE_Effect_Global_OutFlags_2 { 0x08000400 },
         /* [11] */
         AE_Effect_Match_Name {
             "361do Border"
