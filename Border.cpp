@@ -10,6 +10,11 @@
 #undef max
 #endif
 
+inline float smoothstep(float edge0, float edge1, float x) {
+    float t = CLAMP((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 struct EdgePoint {
     A_long x, y;
     bool isTransparent;
@@ -448,16 +453,30 @@ SmartRender(
                     if (outX < 0 || outX >= output->width) continue;
 
                     int signed10 = signedDist[y * input->width + x];
-                    int abs10 = signed10 >= 0 ? signed10 : -signed10;
-                    float dist = abs10 * 0.1f;
-                    if (dist > thicknessInt) continue;
+                    float sdf = signed10 * 0.1f;          // + inside, - outside
 
-                    // Direction filtering
-                    if (direction == DIRECTION_INSIDE && signed10 <= 0) continue;
-                    if (direction == DIRECTION_OUTSIDE && signed10 >= 0) continue;
+                    // Select which side to draw
+                    float dist;
+                    switch (direction) {
+                    case DIRECTION_INSIDE:
+                        if (sdf <= 0.0f) continue; // only inside
+                        dist = sdf;
+                        break;
+                    case DIRECTION_OUTSIDE:
+                        if (sdf >= 0.0f) continue; // only outside
+                        dist = -sdf;
+                        break;
+                    default: // both
+                        dist = fabsf(sdf);
+                        break;
+                    }
 
-                    float coverage = (thicknessInt + AA_RANGE - dist) / AA_RANGE;
-                    coverage = MAX(0.0f, MIN(1.0f, coverage));
+                    if (dist > thicknessInt + AA_RANGE) continue;
+
+                    // Smooth coverage on both inner (edge) and outer (thickness) boundaries
+                    float aInner = smoothstep(0.0f, AA_RANGE, dist);                   // fade in at edge
+                    float aOuter = smoothstep(thicknessInt + AA_RANGE, thicknessInt, dist); // fade out at far side
+                    float coverage = aInner * aOuter;
 
                     PF_Pixel16 src = srcData[x];
                     PF_Pixel16 dst = outData[outX];
@@ -468,7 +487,6 @@ SmartRender(
                     dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
 
                     if (direction == DIRECTION_INSIDE) {
-                        // Keep inside alpha opaque by preserving original
                         dst.alpha = MAX(src.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
                     } else {
                         dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
@@ -490,15 +508,28 @@ SmartRender(
                     if (outX < 0 || outX >= output->width) continue;
 
                     int signed10 = signedDist[y * input->width + x];
-                    int abs10 = signed10 >= 0 ? signed10 : -signed10;
-                    float dist = abs10 * 0.1f;
-                    if (dist > thicknessInt) continue;
+                    float sdf = signed10 * 0.1f;
 
-                    if (direction == DIRECTION_INSIDE && signed10 <= 0) continue;
-                    if (direction == DIRECTION_OUTSIDE && signed10 >= 0) continue;
+                    float dist;
+                    switch (direction) {
+                    case DIRECTION_INSIDE:
+                        if (sdf <= 0.0f) continue;
+                        dist = sdf;
+                        break;
+                    case DIRECTION_OUTSIDE:
+                        if (sdf >= 0.0f) continue;
+                        dist = -sdf;
+                        break;
+                    default:
+                        dist = fabsf(sdf);
+                        break;
+                    }
 
-                    float coverage = (thicknessInt + AA_RANGE - dist) / AA_RANGE;
-                    coverage = MAX(0.0f, MIN(1.0f, coverage));
+                    if (dist > thicknessInt + AA_RANGE) continue;
+
+                    float aInner = smoothstep(0.0f, AA_RANGE, dist);
+                    float aOuter = smoothstep(thicknessInt + AA_RANGE, thicknessInt, dist);
+                    float coverage = aInner * aOuter;
 
                     PF_Pixel8 src = srcData[x];
                     PF_Pixel8 dst = outData[outX];
