@@ -10,6 +10,14 @@
 #undef max
 #endif
 
+// Clamp helper used by smoothstep
+template <typename T>
+T CLAMP(T value, T min, T max) {
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+}
+
 inline float smoothstep(float edge0, float edge1, float x) {
     float t = CLAMP((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
@@ -19,13 +27,6 @@ struct EdgePoint {
     A_long x, y;
     bool isTransparent;
 };
-
-template <typename T>
-T CLAMP(T value, T min, T max) {
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-}
 
 static PF_Err
 About(
