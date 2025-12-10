@@ -358,8 +358,8 @@ SmartRender(
 
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
     float thicknessF = static_cast<float>(thicknessInt);
-    // For BOTH we split thickness half inside/outside to match visual width
-    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
+    // Keep same visual width for all directions. BOTH draws centered on edge.
+    float strokeThicknessF = thicknessF;
 
     if (input && output) {
         // Calculate offset between input and output
@@ -438,6 +438,10 @@ SmartRender(
 
         // STEP 3: Draw the border using signed distance. We supersample 2x2 per pixel
         // with bilinear SDF lookup to get stable AA on diagonals and at Inside/Outside edges.
+        if (strokeThicknessF <= 0.0f) {
+            ERR(extra->cb->checkin_layer_pixels(in_data->effect_ref, checkout_id));
+            return err; // stroke width 0 → nothing to draw
+        }
         const float AA_RANGE = 1.0f; // feather width (pixels)
 
         auto sampleSDF = [&](float fx, float fy) -> float {
@@ -497,21 +501,11 @@ SmartRender(
 
                         float dist;
                         switch (direction) {
-                        case DIRECTION_INSIDE:
-                            if (sdf < -AA_RANGE * 2.0f) continue;
-                            dist = sdf;
-                            if (dist < 0.0f) dist = 0.0f; // clamp to boundary
-                            break;
-                        case DIRECTION_OUTSIDE:
-                            if (sdf > AA_RANGE * 2.0f) continue;
-                            dist = -sdf;
-                            if (dist < 0.0f) dist = 0.0f;
-                            break;
-                        default:
-                            dist = fabsf(sdf);
-                            break;
+                        case DIRECTION_INSIDE:   dist =  sdf; break;  // measure inward
+                        case DIRECTION_OUTSIDE:  dist = -sdf; break;  // measure outward
+                        default: /* both */      dist = fabsf(sdf); break;
                         }
-
+                        if (dist < 0.0f) dist = 0.0f; // only outside the edge we care
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
                         // Coverage: 1 inside the stroke (dist < thickness), then smooth falloff over AA_RANGE
@@ -534,7 +528,7 @@ SmartRender(
                         float strokeA    = strokeCoverage;
                         float invStrokeA = 1.0f - strokeA;
 
-                        float dstR = dst.red   / (float)PF_MAX_CHAN16;
+                        float dstR = dst.red   / (float)PF_MAX_CHAN16; // already premultiplied
                         float dstG = dst.green / (float)PF_MAX_CHAN16;
                         float dstB = dst.blue  / (float)PF_MAX_CHAN16;
 
@@ -544,9 +538,10 @@ SmartRender(
 
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
 
-                        float outR = strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA;
-                        float outG = strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA;
-                        float outB = strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA;
+                        // Composite premultiplied: dst is already premultiplied, so weight by (1-strokeA) only.
+                        float outR = strokeR * strokeA + dstR * invStrokeA;
+                        float outG = strokeG * strokeA + dstG * invStrokeA;
+                        float outB = strokeB * strokeA + dstB * invStrokeA;
 
                         dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                         dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
@@ -580,25 +575,15 @@ SmartRender(
 
                         float dist;
                         switch (direction) {
-                        case DIRECTION_INSIDE:
-                            if (sdf < -AA_RANGE * 2.0f) continue;
-                            dist = sdf;
-                            if (dist < 0.0f) dist = 0.0f;
-                            break;
-                        case DIRECTION_OUTSIDE:
-                            if (sdf > AA_RANGE * 2.0f) continue;
-                            dist = -sdf;
-                            if (dist < 0.0f) dist = 0.0f;
-                            break;
-                        default:
-                            dist = fabsf(sdf);
-                            break;
+                        case DIRECTION_INSIDE:   dist =  sdf; break;
+                        case DIRECTION_OUTSIDE:  dist = -sdf; break;
+                        default:                 dist = fabsf(sdf); break;
                         }
-
+                        if (dist < 0.0f) dist = 0.0f;
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                    float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    strokeCoverage += coverage;
+                        float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
+                        strokeCoverage += coverage;
                     }
 
                     strokeCoverage *= 0.25f;
@@ -616,7 +601,7 @@ SmartRender(
                         float strokeA    = strokeCoverage;
                         float invStrokeA = 1.0f - strokeA;
 
-                        float dstR = dst.red   / (float)PF_MAX_CHAN8;
+                        float dstR = dst.red   / (float)PF_MAX_CHAN8; // premultiplied
                         float dstG = dst.green / (float)PF_MAX_CHAN8;
                         float dstB = dst.blue  / (float)PF_MAX_CHAN8;
 
@@ -626,9 +611,9 @@ SmartRender(
 
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
 
-                        float outR = strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA;
-                        float outG = strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA;
-                        float outB = strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA;
+                        float outR = strokeR * strokeA + dstR * invStrokeA;
+                        float outG = strokeG * strokeA + dstG * invStrokeA;
+                        float outB = strokeB * strokeA + dstB * invStrokeA;
 
                         dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                         dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
