@@ -269,18 +269,28 @@ PreRender(
 
     PF_Rect request_rect = req.rect;
 
-    extra->output->result_rect = in_result.result_rect;
+    // Expand by borderExpansion but clamp to request_rect to satisfy AE: result_rect must not exceed request.
+    PF_Rect expanded = in_result.result_rect;
+    expanded.left   -= borderExpansion;
+    expanded.top    -= borderExpansion;
+    expanded.right  += borderExpansion;
+    expanded.bottom += borderExpansion;
 
-    extra->output->result_rect.left   = MIN(request_rect.left,   in_result.result_rect.left   - borderExpansion);
-    extra->output->result_rect.top    = MIN(request_rect.top,    in_result.result_rect.top    - borderExpansion);
-    extra->output->result_rect.right  = MAX(request_rect.right,  in_result.result_rect.right  + borderExpansion);
-    extra->output->result_rect.bottom = MAX(request_rect.bottom, in_result.result_rect.bottom + borderExpansion);
+    extra->output->result_rect.left   = MAX(request_rect.left,   expanded.left);
+    extra->output->result_rect.top    = MAX(request_rect.top,    expanded.top);
+    extra->output->result_rect.right  = MIN(request_rect.right,  expanded.right);
+    extra->output->result_rect.bottom = MIN(request_rect.bottom, expanded.bottom);
 
-    extra->output->max_result_rect = in_result.max_result_rect;
-    extra->output->max_result_rect.left   = MIN(request_rect.left,   in_result.max_result_rect.left   - borderExpansion);
-    extra->output->max_result_rect.top    = MIN(request_rect.top,    in_result.max_result_rect.top    - borderExpansion);
-    extra->output->max_result_rect.right  = MAX(request_rect.right,  in_result.max_result_rect.right  + borderExpansion);
-    extra->output->max_result_rect.bottom = MAX(request_rect.bottom, in_result.max_result_rect.bottom + borderExpansion);
+    PF_Rect expandedMax = in_result.max_result_rect;
+    expandedMax.left   -= borderExpansion;
+    expandedMax.top    -= borderExpansion;
+    expandedMax.right  += borderExpansion;
+    expandedMax.bottom += borderExpansion;
+
+    extra->output->max_result_rect.left   = MAX(request_rect.left,   expandedMax.left);
+    extra->output->max_result_rect.top    = MAX(request_rect.top,    expandedMax.top);
+    extra->output->max_result_rect.right  = MIN(request_rect.right,  expandedMax.right);
+    extra->output->max_result_rect.bottom = MIN(request_rect.bottom, expandedMax.bottom);
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);
