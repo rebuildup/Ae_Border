@@ -459,16 +459,27 @@ SmartRender(
                     int signed10 = signedDist[y * input->width + x];
                     float sdf = signed10 * 0.1f;          // + inside, - outside
 
-                    // Select which side to draw
+                    // Select which side to draw and allow AA_RANGE bleed for smooth edges
                     float dist;
+                    float edgeFade = 1.0f;
                     switch (direction) {
                     case DIRECTION_INSIDE:
-                        if (sdf <= 0.0f) continue; // only inside
+                        if (sdf < -AA_RANGE) continue; // allow AA bleed into outside
                         dist = sdf;
+                        // Fade from outside edge
+                        if (sdf < 0.0f) {
+                            edgeFade = smoothstep(-AA_RANGE, 0.0f, sdf);
+                            dist = 0.0f;
+                        }
                         break;
                     case DIRECTION_OUTSIDE:
-                        if (sdf >= 0.0f) continue; // only outside
+                        if (sdf > AA_RANGE) continue; // allow AA bleed into inside
                         dist = -sdf;
+                        // Fade from inside edge
+                        if (sdf > 0.0f) {
+                            edgeFade = smoothstep(AA_RANGE, 0.0f, sdf);
+                            dist = 0.0f;
+                        }
                         break;
                     default: // both
                         dist = fabsf(sdf);
@@ -481,7 +492,7 @@ SmartRender(
                     float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     // Fade-out after stroke thickness
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float coverage = aEdge * aOut;
+                    float coverage = aEdge * aOut * edgeFade;
 
                     PF_Pixel16 src = srcData[x];
                     PF_Pixel16 dst = outData[outX];
@@ -519,15 +530,27 @@ SmartRender(
                     int signed10 = signedDist[y * input->width + x];
                     float sdf = signed10 * 0.1f;
 
+                    // Select which side to draw and allow AA_RANGE bleed for smooth edges
                     float dist;
+                    float edgeFade = 1.0f;
                     switch (direction) {
                     case DIRECTION_INSIDE:
-                        if (sdf <= 0.0f) continue;
+                        if (sdf < -AA_RANGE) continue; // allow AA bleed into outside
                         dist = sdf;
+                        // Fade from outside edge
+                        if (sdf < 0.0f) {
+                            edgeFade = smoothstep(-AA_RANGE, 0.0f, sdf);
+                            dist = 0.0f;
+                        }
                         break;
                     case DIRECTION_OUTSIDE:
-                        if (sdf >= 0.0f) continue;
+                        if (sdf > AA_RANGE) continue; // allow AA bleed into inside
                         dist = -sdf;
+                        // Fade from inside edge
+                        if (sdf > 0.0f) {
+                            edgeFade = smoothstep(AA_RANGE, 0.0f, sdf);
+                            dist = 0.0f;
+                        }
                         break;
                     default:
                         dist = fabsf(sdf);
@@ -539,7 +562,7 @@ SmartRender(
                     // Apply anti-aliasing on both edges
                     float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float coverage = aEdge * aOut;
+                    float coverage = aEdge * aOut * edgeFade;
 
                     PF_Pixel8 src = srcData[x];
                     PF_Pixel8 dst = outData[outX];
