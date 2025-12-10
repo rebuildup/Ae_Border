@@ -436,8 +436,37 @@ SmartRender(
             }
         }
 
-        // STEP 3: Draw the border using signed distance (fast, O(N))
-        const float AA_RANGE = 1.0f; // 1 pixel smoothing
+        // STEP 3: Draw the border using signed distance. We supersample 2x2 per pixel
+        // with bilinear SDF lookup to get stable AA on diagonals and at Inside/Outside edges.
+        const float AA_RANGE = 1.0f; // feather width (pixels)
+
+        auto sampleSDF = [&](float fx, float fy) -> float {
+            // Bilinear sample of signedDist (stored scaled by 10)
+            fx = CLAMP(fx, 0.0f, input->width  - 1.001f);
+            fy = CLAMP(fy, 0.0f, input->height - 1.001f);
+            int x0 = (int)fx;
+            int y0 = (int)fy;
+            int x1 = MIN(x0 + 1, input->width  - 1);
+            int y1 = MIN(y0 + 1, input->height - 1);
+            float tx = fx - x0;
+            float ty = fy - y0;
+
+            int d00 = signedDist[y0 * input->width + x0];
+            int d10 = signedDist[y0 * input->width + x1];
+            int d01 = signedDist[y1 * input->width + x0];
+            int d11 = signedDist[y1 * input->width + x1];
+
+            float d0 = d00 + (d10 - d00) * tx;
+            float d1 = d01 + (d11 - d01) * tx;
+            float d = d0 + (d1 - d0) * ty;
+            // Shift 0.5 so edge lies between pixels (center-based SDF)
+            return d * 0.1f - 0.5f;
+        };
+
+        const float sampleOffsets[4][2] = {
+            {-0.25f, -0.25f}, { 0.25f, -0.25f},
+            {-0.25f,  0.25f}, { 0.25f,  0.25f}
+        };
 
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
@@ -456,55 +485,44 @@ SmartRender(
                     A_long outX = x + offsetX;
                     if (outX < 0 || outX >= output->width) continue;
 
-                    int signed10 = signedDist[y * input->width + x];
-                    float sdf = signed10 * 0.1f;          // + inside, - outside
-
-                    PF_Pixel16 src = srcData[x];
                     PF_Pixel16 dst = outData[outX];
-
-                    float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN16;
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
-                    // Select which side to draw
-                    float dist;
-                    float boundaryFade = 1.0f;
-                    
-                    switch (direction) {
-                    case DIRECTION_INSIDE:
-                        if (sdf < -AA_RANGE * 2.0f) continue;
-                        dist = sdf;
-                        // Fade at boundary using source alpha
-                        if (sdf < 0.0f) {
-                            // We're outside the shape - fade stroke based on distance and inverse alpha
-                            boundaryFade = smoothstep(-AA_RANGE * 2.0f, 0.0f, sdf) * (1.0f - srcAlphaNorm);
-                            dist = 0.0f; // treat as if at boundary
+                    // 2x2 supersample
+                    float strokeCoverage = 0.0f;
+                    for (int s = 0; s < 4; ++s) {
+                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        float sdf = sampleSDF(fx, fy); // + inside, - outside
+
+                        float dist;
+                        switch (direction) {
+                        case DIRECTION_INSIDE:
+                            if (sdf < -AA_RANGE * 2.0f) continue;
+                            dist = sdf;
+                            if (dist < 0.0f) dist = 0.0f; // clamp to boundary
+                            break;
+                        case DIRECTION_OUTSIDE:
+                            if (sdf > AA_RANGE * 2.0f) continue;
+                            dist = -sdf;
+                            if (dist < 0.0f) dist = 0.0f;
+                            break;
+                        default:
+                            dist = fabsf(sdf);
+                            break;
                         }
-                        break;
-                    case DIRECTION_OUTSIDE:
-                        if (sdf > AA_RANGE * 2.0f) continue;
-                        dist = -sdf;
-                        // Fade at boundary using source alpha
-                        if (sdf > 0.0f) {
-                            // We're inside the shape - fade stroke based on distance and alpha
-                            boundaryFade = smoothstep(AA_RANGE * 2.0f, 0.0f, sdf) * srcAlphaNorm;
-                            dist = 0.0f; // treat as if at boundary
-                        }
-                        break;
-                    default: // both
-                        dist = fabsf(sdf);
-                        break;
+
+                        if (dist > strokeThicknessF + AA_RANGE) continue;
+
+                        float aEdge = smoothstep(0.0f, AA_RANGE, dist);
+                        float aOut  = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
+                        strokeCoverage += aEdge * aOut;
                     }
 
-                    if (dist > strokeThicknessF + AA_RANGE) continue;
-
-                    // Apply anti-aliasing on outer edge
-                    float aEdge = smoothstep(0.0f, AA_RANGE, dist);
-                    // Fade-out after stroke thickness
-                    float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float strokeCoverage = aEdge * aOut * boundaryFade;
+                    strokeCoverage *= 0.25f; // average 4 samples
 
                     if (strokeCoverage < 0.001f) continue;
-                    
+
                     if (showLineOnly) {
                         // Line only: just draw the stroke (premultiplied)
                         dst.red   = (A_u_short)(edge_color.red   * strokeCoverage);
@@ -551,51 +569,40 @@ SmartRender(
                     A_long outX = x + offsetX;
                     if (outX < 0 || outX >= output->width) continue;
 
-                    int signed10 = signedDist[y * input->width + x];
-                    float sdf = signed10 * 0.1f;
-
-                    PF_Pixel8 src = srcData[x];
                     PF_Pixel8 dst = outData[outX];
-
-                    float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN8;
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
-                    // Select which side to draw
-                    float dist;
-                    float boundaryFade = 1.0f;
-                    
-                    switch (direction) {
-                    case DIRECTION_INSIDE:
-                        if (sdf < -AA_RANGE * 2.0f) continue;
-                        dist = sdf;
-                        // Fade at boundary using source alpha
-                        if (sdf < 0.0f) {
-                            // We're outside the shape - fade stroke based on distance and inverse alpha
-                            boundaryFade = smoothstep(-AA_RANGE * 2.0f, 0.0f, sdf) * (1.0f - srcAlphaNorm);
-                            dist = 0.0f; // treat as if at boundary
+                    float strokeCoverage = 0.0f;
+                    for (int s = 0; s < 4; ++s) {
+                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        float sdf = sampleSDF(fx, fy);
+
+                        float dist;
+                        switch (direction) {
+                        case DIRECTION_INSIDE:
+                            if (sdf < -AA_RANGE * 2.0f) continue;
+                            dist = sdf;
+                            if (dist < 0.0f) dist = 0.0f;
+                            break;
+                        case DIRECTION_OUTSIDE:
+                            if (sdf > AA_RANGE * 2.0f) continue;
+                            dist = -sdf;
+                            if (dist < 0.0f) dist = 0.0f;
+                            break;
+                        default:
+                            dist = fabsf(sdf);
+                            break;
                         }
-                        break;
-                    case DIRECTION_OUTSIDE:
-                        if (sdf > AA_RANGE * 2.0f) continue;
-                        dist = -sdf;
-                        // Fade at boundary using source alpha
-                        if (sdf > 0.0f) {
-                            // We're inside the shape - fade stroke based on distance and alpha
-                            boundaryFade = smoothstep(AA_RANGE * 2.0f, 0.0f, sdf) * srcAlphaNorm;
-                            dist = 0.0f; // treat as if at boundary
-                        }
-                        break;
-                    default:
-                        dist = fabsf(sdf);
-                        break;
+
+                        if (dist > strokeThicknessF + AA_RANGE) continue;
+
+                        float aEdge = smoothstep(0.0f, AA_RANGE, dist);
+                        float aOut  = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
+                        strokeCoverage += aEdge * aOut;
                     }
 
-                    if (dist > strokeThicknessF + AA_RANGE) continue;
-
-                    // Apply anti-aliasing on outer edge
-                    float aEdge = smoothstep(0.0f, AA_RANGE, dist);
-                    float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float strokeCoverage = aEdge * aOut * boundaryFade;
+                    strokeCoverage *= 0.25f;
 
                     if (strokeCoverage < 0.001f) continue;
                     
