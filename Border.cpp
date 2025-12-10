@@ -497,19 +497,21 @@ SmartRender(
                     PF_Pixel16 src = srcData[x];
                     PF_Pixel16 dst = outData[outX];
 
-                    // Blend stroke over existing output (which may already contain source)
-                    // For OUTSIDE, don't paint over opaque source pixels
+                    // Blend stroke over existing output
                     dst.red   = (A_u_short)(edge_color.red   * coverage + dst.red   * (1.0f - coverage));
                     dst.green = (A_u_short)(edge_color.green * coverage + dst.green * (1.0f - coverage));
                     dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
 
-                    if (direction == DIRECTION_INSIDE) {
-                        dst.alpha = MAX(src.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        // treat stroke as behind: keep existing alpha, add stroke alpha where transparent
-                        dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
-                    } else { // BOTH
-                        dst.alpha = MAX(dst.alpha, (A_u_short)(PF_MAX_CHAN16 * coverage));
+                    // Preserve boundary alpha for natural anti-aliasing
+                    if (showLineOnly) {
+                        // Line only mode: use stroke coverage
+                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * coverage);
+                    } else {
+                        // Preserve source alpha at boundary for smooth edges
+                        float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN16;
+                        float strokeAlpha = coverage;
+                        float finalAlpha = MAX(srcAlphaNorm, strokeAlpha);
+                        dst.alpha = (A_u_short)(finalAlpha * PF_MAX_CHAN16);
                     }
 
                     outData[outX] = dst;
@@ -571,12 +573,16 @@ SmartRender(
                     dst.green = (A_u_char)(color.green * coverage + dst.green * (1.0f - coverage));
                     dst.blue  = (A_u_char)(color.blue  * coverage + dst.blue  * (1.0f - coverage));
 
-                    if (direction == DIRECTION_INSIDE) {
-                        dst.alpha = MAX(src.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        dst.alpha = MAX(dst.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
+                    // Preserve boundary alpha for natural anti-aliasing
+                    if (showLineOnly) {
+                        // Line only mode: use stroke coverage
+                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * coverage);
                     } else {
-                        dst.alpha = MAX(dst.alpha, (A_u_char)(PF_MAX_CHAN8 * coverage));
+                        // Preserve source alpha at boundary for smooth edges
+                        float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN8;
+                        float strokeAlpha = coverage;
+                        float finalAlpha = MAX(srcAlphaNorm, strokeAlpha);
+                        dst.alpha = (A_u_char)(finalAlpha * PF_MAX_CHAN8);
                     }
 
                     outData[outX] = dst;
