@@ -501,11 +501,18 @@ SmartRender(
 
                         float dist;
                         switch (direction) {
-                        case DIRECTION_INSIDE:   dist =  sdf; break;  // measure inward
-                        case DIRECTION_OUTSIDE:  dist = -sdf; break;  // measure outward
-                        default: /* both */      dist = fabsf(sdf); break;
+                        case DIRECTION_INSIDE:
+                            if (sdf <= 0.0f) continue;   // only inside
+                            dist =  sdf;
+                            break;
+                        case DIRECTION_OUTSIDE:
+                            if (sdf >= 0.0f) continue;   // only outside
+                            dist = -sdf;
+                            break;
+                        default: /* both */
+                            dist = fabsf(sdf);
+                            break;
                         }
-                        if (dist < 0.0f) dist = 0.0f; // only outside the edge we care
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
                         // Coverage: 1 inside the stroke (dist < thickness), then smooth falloff over AA_RANGE
@@ -575,11 +582,18 @@ SmartRender(
 
                         float dist;
                         switch (direction) {
-                        case DIRECTION_INSIDE:   dist =  sdf; break;
-                        case DIRECTION_OUTSIDE:  dist = -sdf; break;
-                        default:                 dist = fabsf(sdf); break;
+                        case DIRECTION_INSIDE:
+                            if (sdf <= 0.0f) continue;   // only inside
+                            dist =  sdf;
+                            break;
+                        case DIRECTION_OUTSIDE:
+                            if (sdf >= 0.0f) continue;   // only outside
+                            dist = -sdf;
+                            break;
+                        default:
+                            dist = fabsf(sdf);
+                            break;
                         }
-                        if (dist < 0.0f) dist = 0.0f;
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
                         float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
