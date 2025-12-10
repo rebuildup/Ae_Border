@@ -459,26 +459,27 @@ SmartRender(
                     int signed10 = signedDist[y * input->width + x];
                     float sdf = signed10 * 0.1f;          // + inside, - outside
 
-                    // Select which side to draw and allow AA_RANGE bleed for smooth edges
+                    PF_Pixel16 src = srcData[x];
+                    PF_Pixel16 dst = outData[outX];
+
+                    // Select which side to draw
                     float dist;
-                    float edgeFade = 1.0f;
+                    bool preserveBoundary = false;
                     switch (direction) {
                     case DIRECTION_INSIDE:
-                        if (sdf < -AA_RANGE) continue; // allow AA bleed into outside
+                        if (sdf <= 0.0f) continue; // only inside
                         dist = sdf;
-                        // Fade from outside edge
-                        if (sdf < 0.0f) {
-                            edgeFade = smoothstep(-AA_RANGE, 0.0f, sdf);
-                            dist = 0.0f;
+                        // Preserve boundary anti-aliasing
+                        if (dist < AA_RANGE) {
+                            preserveBoundary = true;
                         }
                         break;
                     case DIRECTION_OUTSIDE:
-                        if (sdf > AA_RANGE) continue; // allow AA bleed into inside
+                        if (sdf >= 0.0f) continue; // only outside
                         dist = -sdf;
-                        // Fade from inside edge
-                        if (sdf > 0.0f) {
-                            edgeFade = smoothstep(AA_RANGE, 0.0f, sdf);
-                            dist = 0.0f;
+                        // Preserve boundary anti-aliasing
+                        if (dist < AA_RANGE) {
+                            preserveBoundary = true;
                         }
                         break;
                     default: // both
@@ -488,29 +489,50 @@ SmartRender(
 
                     if (dist > strokeThicknessF + AA_RANGE) continue;
 
+                    // For Inside/Outside modes, preserve original pixels near boundary
+                    if (preserveBoundary && !showLineOnly) {
+                        // Keep source pixel as-is to preserve natural anti-aliasing
+                        outData[outX] = dst;
+                        continue;
+                    }
+
                     // Apply anti-aliasing on both edges
                     float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     // Fade-out after stroke thickness
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float coverage = aEdge * aOut * edgeFade;
+                    float coverage = aEdge * aOut;
 
-                    PF_Pixel16 src = srcData[x];
-                    PF_Pixel16 dst = outData[outX];
-
-                    // Blend stroke over existing output
-                    dst.red   = (A_u_short)(edge_color.red   * coverage + dst.red   * (1.0f - coverage));
-                    dst.green = (A_u_short)(edge_color.green * coverage + dst.green * (1.0f - coverage));
-                    dst.blue  = (A_u_short)(edge_color.blue  * coverage + dst.blue  * (1.0f - coverage));
-
-                    // Preserve boundary alpha for natural anti-aliasing
+                    // Proper premultiplied alpha blending
+                    float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN16;
+                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
+                    
                     if (showLineOnly) {
-                        // Line only mode: use stroke coverage
+                        // Line only: just draw the stroke
+                        dst.red   = (A_u_short)(edge_color.red   * coverage);
+                        dst.green = (A_u_short)(edge_color.green * coverage);
+                        dst.blue  = (A_u_short)(edge_color.blue  * coverage);
                         dst.alpha = (A_u_short)(PF_MAX_CHAN16 * coverage);
                     } else {
-                        // Preserve source alpha at boundary for smooth edges
-                        float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN16;
-                        float strokeAlpha = coverage;
-                        float finalAlpha = MAX(srcAlphaNorm, strokeAlpha);
+                        // Composite stroke over existing output with proper color blending
+                        float finalAlpha = dstAlphaNorm + coverage * (1.0f - dstAlphaNorm);
+                        
+                        if (finalAlpha > 0.0001f) {
+                            // Unpremultiply dst, blend, then premultiply
+                            float dstR = (dstAlphaNorm > 0.0001f) ? (dst.red / dstAlphaNorm) : 0.0f;
+                            float dstG = (dstAlphaNorm > 0.0001f) ? (dst.green / dstAlphaNorm) : 0.0f;
+                            float dstB = (dstAlphaNorm > 0.0001f) ? (dst.blue / dstAlphaNorm) : 0.0f;
+                            
+                            float blendR = (edge_color.red * coverage + dstR * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            float blendG = (edge_color.green * coverage + dstG * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            float blendB = (edge_color.blue * coverage + dstB * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            
+                            dst.red   = (A_u_short)(blendR * finalAlpha);
+                            dst.green = (A_u_short)(blendG * finalAlpha);
+                            dst.blue  = (A_u_short)(blendB * finalAlpha);
+                        } else {
+                            dst.red = dst.green = dst.blue = 0;
+                        }
+                        
                         dst.alpha = (A_u_short)(finalAlpha * PF_MAX_CHAN16);
                     }
 
@@ -532,26 +554,27 @@ SmartRender(
                     int signed10 = signedDist[y * input->width + x];
                     float sdf = signed10 * 0.1f;
 
-                    // Select which side to draw and allow AA_RANGE bleed for smooth edges
+                    PF_Pixel8 src = srcData[x];
+                    PF_Pixel8 dst = outData[outX];
+
+                    // Select which side to draw
                     float dist;
-                    float edgeFade = 1.0f;
+                    bool preserveBoundary = false;
                     switch (direction) {
                     case DIRECTION_INSIDE:
-                        if (sdf < -AA_RANGE) continue; // allow AA bleed into outside
+                        if (sdf <= 0.0f) continue; // only inside
                         dist = sdf;
-                        // Fade from outside edge
-                        if (sdf < 0.0f) {
-                            edgeFade = smoothstep(-AA_RANGE, 0.0f, sdf);
-                            dist = 0.0f;
+                        // Preserve boundary anti-aliasing
+                        if (dist < AA_RANGE) {
+                            preserveBoundary = true;
                         }
                         break;
                     case DIRECTION_OUTSIDE:
-                        if (sdf > AA_RANGE) continue; // allow AA bleed into inside
+                        if (sdf >= 0.0f) continue; // only outside
                         dist = -sdf;
-                        // Fade from inside edge
-                        if (sdf > 0.0f) {
-                            edgeFade = smoothstep(AA_RANGE, 0.0f, sdf);
-                            dist = 0.0f;
+                        // Preserve boundary anti-aliasing
+                        if (dist < AA_RANGE) {
+                            preserveBoundary = true;
                         }
                         break;
                     default:
@@ -561,27 +584,49 @@ SmartRender(
 
                     if (dist > strokeThicknessF + AA_RANGE) continue;
 
+                    // For Inside/Outside modes, preserve original pixels near boundary
+                    if (preserveBoundary && !showLineOnly) {
+                        // Keep source pixel as-is to preserve natural anti-aliasing
+                        outData[outX] = dst;
+                        continue;
+                    }
+
                     // Apply anti-aliasing on both edges
                     float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                    float coverage = aEdge * aOut * edgeFade;
+                    float coverage = aEdge * aOut;
 
-                    PF_Pixel8 src = srcData[x];
-                    PF_Pixel8 dst = outData[outX];
-
-                    dst.red   = (A_u_char)(color.red   * coverage + dst.red   * (1.0f - coverage));
-                    dst.green = (A_u_char)(color.green * coverage + dst.green * (1.0f - coverage));
-                    dst.blue  = (A_u_char)(color.blue  * coverage + dst.blue  * (1.0f - coverage));
-
-                    // Preserve boundary alpha for natural anti-aliasing
+                    // Proper premultiplied alpha blending
+                    float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN8;
+                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
+                    
                     if (showLineOnly) {
-                        // Line only mode: use stroke coverage
+                        // Line only: just draw the stroke
+                        dst.red   = (A_u_char)(color.red   * coverage);
+                        dst.green = (A_u_char)(color.green * coverage);
+                        dst.blue  = (A_u_char)(color.blue  * coverage);
                         dst.alpha = (A_u_char)(PF_MAX_CHAN8 * coverage);
                     } else {
-                        // Preserve source alpha at boundary for smooth edges
-                        float srcAlphaNorm = src.alpha / (float)PF_MAX_CHAN8;
-                        float strokeAlpha = coverage;
-                        float finalAlpha = MAX(srcAlphaNorm, strokeAlpha);
+                        // Composite stroke over existing output with proper color blending
+                        float finalAlpha = dstAlphaNorm + coverage * (1.0f - dstAlphaNorm);
+                        
+                        if (finalAlpha > 0.0001f) {
+                            // Unpremultiply dst, blend, then premultiply
+                            float dstR = (dstAlphaNorm > 0.0001f) ? (dst.red / dstAlphaNorm) : 0.0f;
+                            float dstG = (dstAlphaNorm > 0.0001f) ? (dst.green / dstAlphaNorm) : 0.0f;
+                            float dstB = (dstAlphaNorm > 0.0001f) ? (dst.blue / dstAlphaNorm) : 0.0f;
+                            
+                            float blendR = (color.red * coverage + dstR * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            float blendG = (color.green * coverage + dstG * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            float blendB = (color.blue * coverage + dstB * dstAlphaNorm * (1.0f - coverage)) / finalAlpha;
+                            
+                            dst.red   = (A_u_char)(blendR * finalAlpha);
+                            dst.green = (A_u_char)(blendG * finalAlpha);
+                            dst.blue  = (A_u_char)(blendB * finalAlpha);
+                        } else {
+                            dst.red = dst.green = dst.blue = 0;
+                        }
+                        
                         dst.alpha = (A_u_char)(finalAlpha * PF_MAX_CHAN8);
                     }
 
