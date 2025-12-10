@@ -506,20 +506,34 @@ SmartRender(
                     if (strokeCoverage < 0.001f) continue;
                     
                     if (showLineOnly) {
-                        // Line only: just draw the stroke
+                        // Line only: just draw the stroke (premultiplied)
                         dst.red   = (A_u_short)(edge_color.red   * strokeCoverage);
                         dst.green = (A_u_short)(edge_color.green * strokeCoverage);
                         dst.blue  = (A_u_short)(edge_color.blue  * strokeCoverage);
-                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCoverage);
+                        dst.alpha = (A_u_short)(PF_MAX_CHAN16    * strokeCoverage);
                     } else {
-                        // Normal blend mode: stroke over destination
-                        float invStroke = 1.0f - strokeCoverage;
-                        dst.red   = (A_u_short)(edge_color.red   * strokeCoverage + dst.red   * invStroke);
-                        dst.green = (A_u_short)(edge_color.green * strokeCoverage + dst.green * invStroke);
-                        dst.blue  = (A_u_short)(edge_color.blue  * strokeCoverage + dst.blue  * invStroke);
-                        
-                        float finalAlpha = MAX(dstAlphaNorm, strokeCoverage);
-                        dst.alpha = (A_u_short)(finalAlpha * PF_MAX_CHAN16);
+                        // Proper premultiplied alpha compositing: stroke OVER dst
+                        float strokeA    = strokeCoverage;
+                        float invStrokeA = 1.0f - strokeA;
+
+                        float dstR = dst.red   / (float)PF_MAX_CHAN16;
+                        float dstG = dst.green / (float)PF_MAX_CHAN16;
+                        float dstB = dst.blue  / (float)PF_MAX_CHAN16;
+
+                        float strokeR = edge_color.red   / (float)PF_MAX_CHAN16;
+                        float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
+                        float strokeB = edge_color.blue  / (float)PF_MAX_CHAN16;
+
+                        float outA = strokeA + dstAlphaNorm * invStrokeA;
+
+                        float outR = strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA;
+                        float outG = strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA;
+                        float outB = strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA;
+
+                        dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.green = (A_u_short)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.blue  = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                     }
 
                     outData[outX] = dst;
@@ -586,20 +600,34 @@ SmartRender(
                     if (strokeCoverage < 0.001f) continue;
                     
                     if (showLineOnly) {
-                        // Line only: just draw the stroke
+                        // Line only: just draw the stroke (premultiplied)
                         dst.red   = (A_u_char)(color.red   * strokeCoverage);
                         dst.green = (A_u_char)(color.green * strokeCoverage);
                         dst.blue  = (A_u_char)(color.blue  * strokeCoverage);
                         dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage);
                     } else {
-                        // Normal blend mode: stroke over destination
-                        float invStroke = 1.0f - strokeCoverage;
-                        dst.red   = (A_u_char)(color.red   * strokeCoverage + dst.red   * invStroke);
-                        dst.green = (A_u_char)(color.green * strokeCoverage + dst.green * invStroke);
-                        dst.blue  = (A_u_char)(color.blue  * strokeCoverage + dst.blue  * invStroke);
-                        
-                        float finalAlpha = MAX(dstAlphaNorm, strokeCoverage);
-                        dst.alpha = (A_u_char)(finalAlpha * PF_MAX_CHAN8);
+                        // Proper premultiplied alpha compositing: stroke OVER dst
+                        float strokeA    = strokeCoverage;
+                        float invStrokeA = 1.0f - strokeA;
+
+                        float dstR = dst.red   / (float)PF_MAX_CHAN8;
+                        float dstG = dst.green / (float)PF_MAX_CHAN8;
+                        float dstB = dst.blue  / (float)PF_MAX_CHAN8;
+
+                        float strokeR = color.red   / (float)PF_MAX_CHAN8;
+                        float strokeG = color.green / (float)PF_MAX_CHAN8;
+                        float strokeB = color.blue  / (float)PF_MAX_CHAN8;
+
+                        float outA = strokeA + dstAlphaNorm * invStrokeA;
+
+                        float outR = strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA;
+                        float outG = strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA;
+                        float outB = strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA;
+
+                        dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.green = (A_u_char)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.blue  = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                     }
 
                     outData[outX] = dst;
