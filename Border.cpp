@@ -362,9 +362,9 @@ SmartRender(
     float strokeThicknessF = thicknessF;
 
     if (input && output) {
-        // Calculate offset between input and output
-        A_long offsetX = input->origin_x - output->origin_x;
-        A_long offsetY = input->origin_y - output->origin_y;
+        // Calculate offset between input and output (output may be expanded)
+        A_long offsetX = output->origin_x - input->origin_x;
+        A_long offsetY = output->origin_y - input->origin_y;
 
         // Generate signed distance field (fast chamfer, scaled by 10)
         std::vector<int> signedDist;
@@ -463,8 +463,8 @@ SmartRender(
             float d0 = d00 + (d10 - d00) * tx;
             float d1 = d01 + (d11 - d01) * tx;
             float d = d0 + (d1 - d0) * ty;
-            // Shift 0.5 so edge lies between pixels (center-based SDF)
-            return d * 0.1f - 0.5f;
+            // No extra shift: keep SDF edge aligned to pixel centers to avoid lateral bias
+            return d * 0.1f;
         };
 
         const float sampleOffsets[4][2] = {
