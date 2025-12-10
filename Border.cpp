@@ -79,7 +79,7 @@ ParamsSetup(
         BORDER_THICKNESS_MAX,
         0,
         100,
-        1,
+        2,
         PF_Precision_TENTHS,
         0,
         0,
@@ -477,10 +477,8 @@ SmartRender(
 
                     if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                    // Edge fade-in (different slope for outside to avoid gaps)
-                    float aEdge = (direction == DIRECTION_OUTSIDE)
-                        ? 1.0f                                // keep full strength at the edge for outside
-                        : smoothstep(0.0f, AA_RANGE, dist);   // fade in for inside/both
+                    // Apply anti-aliasing on both edges
+                    float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     // Fade-out after stroke thickness
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
                     float coverage = aEdge * aOut;
@@ -538,9 +536,8 @@ SmartRender(
 
                     if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                    float aEdge = (direction == DIRECTION_OUTSIDE)
-                        ? 1.0f
-                        : smoothstep(0.0f, AA_RANGE, dist);
+                    // Apply anti-aliasing on both edges
+                    float aEdge = smoothstep(0.0f, AA_RANGE, dist);
                     float aOut = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
                     float coverage = aEdge * aOut;
 

@@ -43,7 +43,7 @@ typedef short int			int16;
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
-#define BORDER_THICKNESS_DFLT    1.0
+#define BORDER_THICKNESS_DFLT    2.0
 
 #define BORDER_THRESHOLD_MIN     0
 #define BORDER_THRESHOLD_MAX     255
