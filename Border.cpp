@@ -271,16 +271,16 @@ PreRender(
 
     extra->output->result_rect = in_result.result_rect;
 
-    extra->output->result_rect.left = MAX(request_rect.left, in_result.result_rect.left - borderExpansion);
-    extra->output->result_rect.top = MAX(request_rect.top, in_result.result_rect.top - borderExpansion);
-    extra->output->result_rect.right = MIN(request_rect.right, in_result.result_rect.right + borderExpansion);
-    extra->output->result_rect.bottom = MIN(request_rect.bottom, in_result.result_rect.bottom + borderExpansion);
+    extra->output->result_rect.left   = MIN(request_rect.left,   in_result.result_rect.left   - borderExpansion);
+    extra->output->result_rect.top    = MIN(request_rect.top,    in_result.result_rect.top    - borderExpansion);
+    extra->output->result_rect.right  = MAX(request_rect.right,  in_result.result_rect.right  + borderExpansion);
+    extra->output->result_rect.bottom = MAX(request_rect.bottom, in_result.result_rect.bottom + borderExpansion);
 
     extra->output->max_result_rect = in_result.max_result_rect;
-    extra->output->max_result_rect.left = MAX(request_rect.left, in_result.max_result_rect.left - borderExpansion);
-    extra->output->max_result_rect.top = MAX(request_rect.top, in_result.max_result_rect.top - borderExpansion);
-    extra->output->max_result_rect.right = MIN(request_rect.right, in_result.max_result_rect.right + borderExpansion);
-    extra->output->max_result_rect.bottom = MIN(request_rect.bottom, in_result.max_result_rect.bottom + borderExpansion);
+    extra->output->max_result_rect.left   = MIN(request_rect.left,   in_result.max_result_rect.left   - borderExpansion);
+    extra->output->max_result_rect.top    = MIN(request_rect.top,    in_result.max_result_rect.top    - borderExpansion);
+    extra->output->max_result_rect.right  = MAX(request_rect.right,  in_result.max_result_rect.right  + borderExpansion);
+    extra->output->max_result_rect.bottom = MAX(request_rect.bottom, in_result.max_result_rect.bottom + borderExpansion);
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);
@@ -363,8 +363,10 @@ SmartRender(
 
     if (input && output) {
         // Calculate offset between input and output (output may be expanded)
-        A_long offsetX = output->origin_x - input->origin_x;
-        A_long offsetY = output->origin_y - input->origin_y;
+        // We want output pixel (outX,outY) to map to input (x,y) at the same comp space.
+        // If output is expanded (origin more negative), we need a positive offset to index into it.
+        A_long offsetX = input->origin_x - output->origin_x;
+        A_long offsetY = input->origin_y - output->origin_y;
 
         // Generate signed distance field (fast chamfer, scaled by 10)
         std::vector<int> signedDist;
