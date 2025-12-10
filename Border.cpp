@@ -358,8 +358,8 @@ SmartRender(
 
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
     float thicknessF = static_cast<float>(thicknessInt);
-    // Keep same visual width for all directions. BOTH draws centered on edge.
-    float strokeThicknessF = thicknessF;
+    // BOTH draws half inside + half outside so visible幅=thicknessF
+    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
 
     if (input && output) {
         // Calculate offset between input and output (output may be expanded)
