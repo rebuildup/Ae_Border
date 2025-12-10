@@ -514,9 +514,9 @@ SmartRender(
 
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                        float aEdge = smoothstep(0.0f, AA_RANGE, dist);
-                        float aOut  = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                        strokeCoverage += aEdge * aOut;
+                        // Coverage: 1 inside the stroke (dist < thickness), then smooth falloff over AA_RANGE
+                        float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
+                        strokeCoverage += coverage;
                     }
 
                     strokeCoverage *= 0.25f; // average 4 samples
@@ -597,9 +597,8 @@ SmartRender(
 
                         if (dist > strokeThicknessF + AA_RANGE) continue;
 
-                        float aEdge = smoothstep(0.0f, AA_RANGE, dist);
-                        float aOut  = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                        strokeCoverage += aEdge * aOut;
+                    float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
+                    strokeCoverage += coverage;
                     }
 
                     strokeCoverage *= 0.25f;
