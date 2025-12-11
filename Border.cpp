@@ -495,8 +495,9 @@ SmartRender(
                     // 2x2 supersample
                     float strokeCoverage = 0.0f;
                     for (int s = 0; s < 4; ++s) {
-                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        // Sample in input pixel space (outX/outY already aligned to input coords)
+                        float fx = (float)outX + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)outY + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy); // + inside, - outside
 
                         float dist;
@@ -576,8 +577,9 @@ SmartRender(
 
                     float strokeCoverage = 0.0f;
                     for (int s = 0; s < 4; ++s) {
-                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        // Sample in input pixel space (outX/outY already aligned to input coords)
+                        float fx = (float)outX + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)outY + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy);
 
                         float dist;
