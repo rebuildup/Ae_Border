@@ -267,6 +267,11 @@ PreRender(
 
     extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
 
+    // Host uses this to validate result_rect; initialize it to the request we actually made.
+    // Without setting it, the structure can contain garbage and trigger
+    // “result rect must not exceed request rect” errors in PreRender.
+    extra->output->output_request = req;
+
     PF_Rect request_rect = req.rect;
 
     // Expand by borderExpansion but clamp to request_rect to satisfy AE: result_rect must not exceed request.
