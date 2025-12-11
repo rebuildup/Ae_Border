@@ -229,8 +229,6 @@ PreRender(
     PF_RenderRequest req = extra->input->output_request;
     PF_CheckoutResult in_result;
 
-    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
-
     PF_ParamDef thickness_param;
     AEFX_CLR_STRUCT(thickness_param);
     ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &thickness_param));
@@ -265,37 +263,22 @@ PreRender(
 
     A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 5;
 
+    // Ask AE for a slightly larger input region so we can sample beyond the request
+    // when drawing the border. Output rect itself must stay within the host's request.
+    req.rect.left   -= borderExpansion;
+    req.rect.top    -= borderExpansion;
+    req.rect.right  += borderExpansion;
+    req.rect.bottom += borderExpansion;
+    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
+
     extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
 
-    // Host uses this to validate result_rect; initialize it to the request we actually made.
-    // Without setting it, the structure can contain garbage and trigger
-    // “result rect must not exceed request rect” errors in PreRender.
-    extra->output->output_request = req;
+    PF_Rect request_rect = extra->input->output_request.rect;
 
-    PF_Rect request_rect = req.rect;
-
-    // Expand by borderExpansion but clamp to request_rect to satisfy AE: result_rect must not exceed request.
-    PF_Rect expanded = in_result.result_rect;
-    expanded.left   -= borderExpansion;
-    expanded.top    -= borderExpansion;
-    expanded.right  += borderExpansion;
-    expanded.bottom += borderExpansion;
-
-    extra->output->result_rect.left   = MAX(request_rect.left,   expanded.left);
-    extra->output->result_rect.top    = MAX(request_rect.top,    expanded.top);
-    extra->output->result_rect.right  = MIN(request_rect.right,  expanded.right);
-    extra->output->result_rect.bottom = MIN(request_rect.bottom, expanded.bottom);
-
-    PF_Rect expandedMax = in_result.max_result_rect;
-    expandedMax.left   -= borderExpansion;
-    expandedMax.top    -= borderExpansion;
-    expandedMax.right  += borderExpansion;
-    expandedMax.bottom += borderExpansion;
-
-    extra->output->max_result_rect.left   = MAX(request_rect.left,   expandedMax.left);
-    extra->output->max_result_rect.top    = MAX(request_rect.top,    expandedMax.top);
-    extra->output->max_result_rect.right  = MIN(request_rect.right,  expandedMax.right);
-    extra->output->max_result_rect.bottom = MIN(request_rect.bottom, expandedMax.bottom);
+    // Output must not exceed the host's request. Keep result_rect inside request,
+    // but advertise the largest possible region with max_result_rect (also inside request).
+    extra->output->result_rect     = request_rect;
+    extra->output->max_result_rect = request_rect;
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);
