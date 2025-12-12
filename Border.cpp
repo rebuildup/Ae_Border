@@ -275,10 +275,18 @@ PreRender(
 
     PF_Rect request_rect = extra->input->output_request.rect;
 
-    // Output must not exceed the host's request. Keep result_rect inside request,
-    // but advertise the largest possible region with max_result_rect (also inside request).
-    extra->output->result_rect     = request_rect;
-    extra->output->max_result_rect = request_rect;
+    // Expand output extents when drawing outside/both, so AE allocates enough pixels
+    // for the stroke instead of clipping (which looks like a lateral shift).
+    PF_Rect out_rect = request_rect;
+    if (direction != DIRECTION_INSIDE && borderExpansion > 0) {
+        out_rect.left   -= borderExpansion;
+        out_rect.top    -= borderExpansion;
+        out_rect.right  += borderExpansion;
+        out_rect.bottom += borderExpansion;
+    }
+
+    extra->output->result_rect     = out_rect;
+    extra->output->max_result_rect = out_rect;
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);
