@@ -64,8 +64,9 @@ GlobalSetup(
                           PF_OutFlag_I_EXPAND_BUFFER;
     // REVEALS_ZERO_ALPHA is important for Shape/Text layers: AE may otherwise crop
     // the renderable rect to non-zero alpha, which prevents drawing Outside bounds.
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
-                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
+    // We intentionally do NOT advertise Smart Render, because in practice it can clamp
+    // Shape/Text output to the layer bounds even when returning extra pixels.
+    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
                            PF_OutFlag2_REVEALS_ZERO_ALPHA;
 
     return PF_Err_NONE;
@@ -135,6 +136,88 @@ ParamsSetup(
         SHOW_LINE_ONLY_DISK_ID);
 
     out_data->num_params = BORDER_NUM_PARAMS;
+
+    return err;
+}
+
+static inline float BorderDownscaleFactor(const PF_RationalScale& scale)
+{
+    if (scale.den == 0) return 1.0f;
+    float v = (float)scale.num / (float)scale.den;
+    return (v > 0.0f) ? v : 1.0f;
+}
+
+static inline void BorderComputePixelThickness(
+    PF_InData* in_data,
+    PF_FpLong thicknessParam,
+    A_long direction,
+    float& outStrokeThicknessPx,  // stroke thickness on the chosen side (pixels)
+    A_long& outExpansionPx)       // expansion required (pixels)
+{
+    float downsize_x = (float)in_data->downsample_x.den / (float)in_data->downsample_x.num;
+    float downsize_y = (float)in_data->downsample_y.den / (float)in_data->downsample_y.num;
+    float resolution_factor = MIN(downsize_x, downsize_y);
+
+    float pixelThickness;
+    if (thicknessParam <= 0.0f) {
+        pixelThickness = 0.0f;
+    } else if (thicknessParam <= 10.0f) {
+        pixelThickness = (float)thicknessParam;
+    } else {
+        float normalizedThickness = (float)((thicknessParam - 10.0f) / 90.0f);
+        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
+    }
+
+    float outsideThicknessPx = 0.0f;
+    if (direction == DIRECTION_OUTSIDE) {
+        outsideThicknessPx = pixelThickness;
+    } else if (direction == DIRECTION_BOTH) {
+        outsideThicknessPx = pixelThickness * 0.5f;
+    }
+
+    // This is used by the renderer for stroke evaluation.
+    outStrokeThicknessPx = (direction == DIRECTION_BOTH) ? (pixelThickness * 0.5f) : pixelThickness;
+
+    // Expand by outside thickness only (inside doesn't need extra pixels).
+    const float AA_RANGE_PX = 1.0f;
+    const float SAMPLE_GUARD_PX = 1.0f;
+    if (outsideThicknessPx > 0.0f) {
+        outExpansionPx = (A_long)ceil((outsideThicknessPx / resolution_factor) + AA_RANGE_PX + SAMPLE_GUARD_PX);
+    } else {
+        outExpansionPx = 0;
+    }
+}
+
+static PF_Err
+FrameSetup(
+    PF_InData* in_data,
+    PF_OutData* out_data,
+    PF_ParamDef* params[],
+    PF_LayerDef* output)
+{
+    PF_Err err = PF_Err_NONE;
+
+    PF_FpLong thickness = params[BORDER_THICKNESS]->u.fs_d.value;
+    A_long direction = params[BORDER_DIRECTION]->u.pd.value;
+
+    float strokeThicknessPx = 0.0f;
+    A_long expansionPx = 0;
+    BorderComputePixelThickness(in_data, thickness, direction, strokeThicknessPx, expansionPx);
+
+    const A_long srcW = params[BORDER_INPUT]->u.ld.width;
+    const A_long srcH = params[BORDER_INPUT]->u.ld.height;
+
+    if (expansionPx > 0) {
+        out_data->width = srcW + expansionPx * 2;
+        out_data->height = srcH + expansionPx * 2;
+        out_data->origin.x = expansionPx;
+        out_data->origin.y = expansionPx;
+    } else {
+        out_data->width = srcW;
+        out_data->height = srcH;
+        out_data->origin.x = 0;
+        out_data->origin.y = 0;
+    }
 
     return err;
 }
@@ -280,6 +363,115 @@ ComputeSignedDistanceField(
 
     return PF_Err_NONE;
 }
+
+template <typename IsSolidFn>
+static void
+ComputeSignedDistanceFieldFromSolid(
+    A_long width,
+    A_long height,
+    IsSolidFn isSolid,
+    std::vector<int>& signedDist) // scaled by 10
+{
+    const int INF = 1 << 29;
+    const A_long w = width;
+    const A_long h = height;
+
+    signedDist.assign(w * h, 0);
+
+    // 1D squared EDT (Felzenszwalb & Huttenlocher).
+    // Uses scratch buffers to avoid per-row/col allocations (important for tiled renders).
+    auto edt1d = [&](const int* f, int n, int* d, std::vector<int>& v, std::vector<float>& z) {
+        if ((int)v.size() < n) v.resize(n);
+        if ((int)z.size() < n + 1) z.resize(n + 1);
+
+        const float INF_F = std::numeric_limits<float>::infinity();
+
+        int k = 0;
+        v[0] = 0;
+        z[0] = -INF_F;
+        z[1] = INF_F;
+
+        auto sep = [&](int i, int u)->float {
+            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
+        };
+
+        for (int q = 1; q < n; ++q) {
+            float s = sep(v[k], q);
+            while (k > 0 && s <= z[k]) {
+                --k;
+                s = sep(v[k], q);
+            }
+            ++k;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = INF_F;
+        }
+
+        k = 0;
+        for (int q = 0; q < n; ++q) {
+            while (z[k + 1] < (float)q) ++k;
+            int dx = q - v[k];
+            d[q] = dx * dx + f[v[k]];
+        }
+    };
+
+    // Scratch buffers reused across calls (thread-safe across AE's threaded rendering).
+    thread_local std::vector<int> vScratch;
+    thread_local std::vector<float> zScratch;
+    thread_local std::vector<int> lineIn;
+    thread_local std::vector<int> lineOut;
+    thread_local std::vector<int> tmp;
+
+    auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
+        d2d.assign(w * h, INF);
+
+        if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
+
+        for (A_long y = 0; y < h; ++y) {
+            lineIn.resize((size_t)w);
+            lineOut.resize((size_t)w);
+            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
+
+            edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
+            for (A_long x = 0; x < w; ++x) tmp[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
+        }
+
+        for (A_long x = 0; x < w; ++x) {
+            lineIn.resize((size_t)h);
+            lineOut.resize((size_t)h);
+            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
+
+            edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
+            for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
+        }
+    };
+
+    std::vector<int> fFg(w * h, INF);
+    std::vector<int> fBg(w * h, INF);
+    for (A_long y = 0; y < h; ++y) {
+        for (A_long x = 0; x < w; ++x) {
+            bool solid = isSolid(x, y);
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            if (solid) fFg[i] = 0;
+            else fBg[i] = 0;
+        }
+    }
+
+    std::vector<int> dtFg2, dtBg2;
+    edt2d(fFg, dtFg2);
+    edt2d(fBg, dtBg2);
+
+    for (A_long y = 0; y < h; ++y) {
+        for (A_long x = 0; x < w; ++x) {
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            float distToFg = sqrtf((float)dtFg2[i]);
+            float distToBg = sqrtf((float)dtBg2[i]);
+            float sdf = distToBg - distToFg;
+            signedDist[i] = (int)floorf(sdf * 10.0f + (sdf >= 0.0f ? 0.5f : -0.5f));
+        }
+    }
+}
+
 static PF_Err
 PreRender(
     PF_InData* in_data,
@@ -380,15 +572,14 @@ PreRender(
     PF_LRect result_rect = request_rect;
 
     // max_result_rect must be stable (not depend on requested size).
-    // Use the reference layer size as the base bounds when available.
     // For Shape/Text layers, max_result_rect from checkout can be tightly cropped,
-    // but ref_width/ref_height represent the full layer raster space (comp size for collapsed layers).
+    // but ref_width/ref_height represent the full layer raster dimensions.
+    //
+    // IMPORTANT: rect coordinates may not be (0,0)-based; preserve the returned origin.
     PF_LRect max_rect = bounds_result.max_result_rect;
     if (bounds_result.ref_width > 0 && bounds_result.ref_height > 0) {
-        max_rect.left = 0;
-        max_rect.top = 0;
-        max_rect.right = bounds_result.ref_width;
-        max_rect.bottom = bounds_result.ref_height;
+        max_rect.right = max_rect.left + bounds_result.ref_width;
+        max_rect.bottom = max_rect.top + bounds_result.ref_height;
     }
 
     auto expand_rect = [](PF_LRect& r, A_long e) {
@@ -824,6 +1015,357 @@ Render(
     PF_LayerDef* output)
 {
     PF_Err err = PF_Err_NONE;
+
+    PF_EffectWorld* input = &params[BORDER_INPUT]->u.ld;
+
+    PF_FpLong thickness = params[BORDER_THICKNESS]->u.fs_d.value;
+    PF_Pixel8 color = params[BORDER_COLOR]->u.cd.value;
+    A_u_char threshold = (A_u_char)params[BORDER_THRESHOLD]->u.sd.value;
+    A_long direction = params[BORDER_DIRECTION]->u.pd.value;
+    PF_Boolean showLineOnly = params[BORDER_SHOW_LINE_ONLY]->u.bd.value;
+
+    float downsize_x = (float)in_data->downsample_x.den / (float)in_data->downsample_x.num;
+    float downsize_y = (float)in_data->downsample_y.den / (float)in_data->downsample_y.num;
+    float resolution_factor = MIN(downsize_x, downsize_y);
+
+    float pixelThickness;
+    if (thickness <= 0.0f) {
+        pixelThickness = 0.0f;
+    } else if (thickness <= 10.0f) {
+        pixelThickness = (float)thickness;
+    } else {
+        float normalizedThickness = (float)((thickness - 10.0f) / 90.0f);
+        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
+    }
+
+    A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
+    float thicknessF = (float)thicknessInt;
+    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
+
+    if (strokeThicknessF <= 0.0f) {
+        // Nothing to draw; copy input unless line-only.
+        if (!showLineOnly) {
+            if (PF_WORLD_IS_DEEP(output)) {
+                for (A_long y = 0; y < output->height; ++y) {
+                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
+                    for (A_long x = 0; x < output->width; ++x) {
+                        outData[x].alpha = 0;
+                        outData[x].red = outData[x].green = outData[x].blue = 0;
+                    }
+                }
+            } else {
+                for (A_long y = 0; y < output->height; ++y) {
+                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
+                    for (A_long x = 0; x < output->width; ++x) {
+                        outData[x].alpha = 0;
+                        outData[x].red = outData[x].green = outData[x].blue = 0;
+                    }
+                }
+            }
+
+            const A_long originX = in_data->output_origin_x;
+            const A_long originY = in_data->output_origin_y;
+            if (PF_WORLD_IS_DEEP(output)) {
+                for (A_long oy = 0; oy < output->height; ++oy) {
+                    A_long iy = oy - originY;
+                    if (iy < 0 || iy >= input->height) continue;
+                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+                    PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
+                    for (A_long ox = 0; ox < output->width; ++ox) {
+                        A_long ix = ox - originX;
+                        if (ix < 0 || ix >= input->width) continue;
+                        outData[ox] = inData[ix];
+                    }
+                }
+            } else {
+                for (A_long oy = 0; oy < output->height; ++oy) {
+                    A_long iy = oy - originY;
+                    if (iy < 0 || iy >= input->height) continue;
+                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+                    PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
+                    for (A_long ox = 0; ox < output->width; ++ox) {
+                        A_long ix = ox - originX;
+                        if (ix < 0 || ix >= input->width) continue;
+                        outData[ox] = inData[ix];
+                    }
+                }
+            }
+        }
+        return err;
+    }
+
+    // Build SDF on the expanded output grid so we can evaluate Outside bounds.
+    const A_long originX = in_data->output_origin_x;
+    const A_long originY = in_data->output_origin_y;
+    const A_long gridW = output->width;
+    const A_long gridH = output->height;
+
+    // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
+    A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
+    A_u_short thresholdSdf16 = thresholdSdf8 * 257;
+
+    auto isSolidGrid = [&](A_long gx, A_long gy) -> bool {
+        A_long ix = gx - originX;
+        A_long iy = gy - originY;
+        if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) {
+            return false;
+        }
+        if (PF_WORLD_IS_DEEP(input)) {
+            PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes) + ix;
+            return p->alpha > thresholdSdf16;
+        } else {
+            PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes) + ix;
+            return p->alpha > thresholdSdf8;
+        }
+    };
+
+    std::vector<int> signedDist;
+    ComputeSignedDistanceFieldFromSolid(gridW, gridH, isSolidGrid, signedDist);
+
+    // Clear output to transparent.
+    if (PF_WORLD_IS_DEEP(output)) {
+        for (A_long y = 0; y < output->height; ++y) {
+            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
+            for (A_long x = 0; x < output->width; ++x) {
+                outData[x].alpha = 0;
+                outData[x].red = outData[x].green = outData[x].blue = 0;
+            }
+        }
+    } else {
+        for (A_long y = 0; y < output->height; ++y) {
+            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
+            for (A_long x = 0; x < output->width; ++x) {
+                outData[x].alpha = 0;
+                outData[x].red = outData[x].green = outData[x].blue = 0;
+            }
+        }
+    }
+
+    // Copy source into expanded output if not line-only.
+    if (!showLineOnly) {
+        if (PF_WORLD_IS_DEEP(output)) {
+            for (A_long oy = 0; oy < output->height; ++oy) {
+                A_long iy = oy - originY;
+                if (iy < 0 || iy >= input->height) continue;
+                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+                PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
+                for (A_long ox = 0; ox < output->width; ++ox) {
+                    A_long ix = ox - originX;
+                    if (ix < 0 || ix >= input->width) continue;
+                    outData[ox] = inData[ix];
+                }
+            }
+        } else {
+            for (A_long oy = 0; oy < output->height; ++oy) {
+                A_long iy = oy - originY;
+                if (iy < 0 || iy >= input->height) continue;
+                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+                PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
+                for (A_long ox = 0; ox < output->width; ++ox) {
+                    A_long ix = ox - originX;
+                    if (ix < 0 || ix >= input->width) continue;
+                    outData[ox] = inData[ix];
+                }
+            }
+        }
+    }
+
+    const float AA_RANGE = 1.0f;
+
+    auto sampleSDF = [&](float fx, float fy) -> float {
+        fx = CLAMP(fx, 0.0f, gridW - 1.001f);
+        fy = CLAMP(fy, 0.0f, gridH - 1.001f);
+        int x0 = (int)fx;
+        int y0 = (int)fy;
+        int x1 = MIN(x0 + 1, (int)gridW - 1);
+        int y1 = MIN(y0 + 1, (int)gridH - 1);
+        float tx = fx - x0;
+        float ty = fy - y0;
+
+        int d00 = signedDist[(size_t)y0 * (size_t)gridW + (size_t)x0];
+        int d10 = signedDist[(size_t)y0 * (size_t)gridW + (size_t)x1];
+        int d01 = signedDist[(size_t)y1 * (size_t)gridW + (size_t)x0];
+        int d11 = signedDist[(size_t)y1 * (size_t)gridW + (size_t)x1];
+
+        float d0 = d00 + (d10 - d00) * tx;
+        float d1 = d01 + (d11 - d01) * tx;
+        float d = d0 + (d1 - d0) * ty;
+
+        float sdf = d * 0.1f;
+        if (sdf > 0.0f) sdf -= 0.5f;
+        else if (sdf < 0.0f) sdf += 0.5f;
+        return sdf;
+    };
+
+    const float sampleOffsets[4][2] = {
+        {-0.25f, -0.25f}, { 0.25f, -0.25f},
+        {-0.25f,  0.25f}, { 0.25f,  0.25f}
+    };
+
+    auto sdfCenterAdjusted = [&](A_long gx, A_long gy) -> float {
+        gx = CLAMP(gx, (A_long)0, gridW - 1);
+        gy = CLAMP(gy, (A_long)0, gridH - 1);
+        float sdf = signedDist[(size_t)gy * (size_t)gridW + (size_t)gx] * 0.1f;
+        if (sdf > 0.0f) sdf -= 0.5f;
+        else if (sdf < 0.0f) sdf += 0.5f;
+        return sdf;
+    };
+
+    const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
+
+    auto strokeSampleCoverage = [&](float sdf) -> float {
+        float sideMask = 1.0f;
+        if (direction == DIRECTION_INSIDE) {
+            sideMask = smoothstep(-AA_RANGE, 0.0f, sdf);
+            sdf = CLAMP(sdf, 0.0f, 1e9f);
+        } else if (direction == DIRECTION_OUTSIDE) {
+            sideMask = 1.0f - smoothstep(0.0f, AA_RANGE, sdf);
+            sdf = CLAMP(-sdf, 0.0f, 1e9f);
+        } else {
+            sdf = fabsf(sdf);
+        }
+
+        if (sdf > strokeThicknessF + AA_RANGE) return 0.0f;
+        float stroke = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, sdf);
+        return stroke * sideMask;
+    };
+
+    if (PF_WORLD_IS_DEEP(output)) {
+        PF_Pixel16 edge_color;
+        edge_color.alpha = PF_MAX_CHAN16;
+        edge_color.red = PF_BYTE_TO_CHAR(color.red);
+        edge_color.green = PF_BYTE_TO_CHAR(color.green);
+        edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
+
+        for (A_long oy = 0; oy < output->height; ++oy) {
+            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+            for (A_long ox = 0; ox < output->width; ++ox) {
+                PF_Pixel16 dst = outData[ox];
+                float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
+
+                // Fast reject
+                {
+                    float sdfC = sdfCenterAdjusted(ox, oy);
+                    float distC;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < -MAX_EVAL_DIST) continue;
+                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > MAX_EVAL_DIST) continue;
+                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                    } else {
+                        distC = fabsf(sdfC);
+                    }
+                    if (distC > MAX_EVAL_DIST) continue;
+                }
+
+                float strokeCoverage = 0.0f;
+                for (int s = 0; s < 4; ++s) {
+                    float fx = (float)ox + 0.5f + sampleOffsets[s][0];
+                    float fy = (float)oy + 0.5f + sampleOffsets[s][1];
+                    float sdf = sampleSDF(fx, fy);
+                    strokeCoverage += strokeSampleCoverage(sdf);
+                }
+                strokeCoverage *= 0.25f;
+                if (strokeCoverage < 0.001f) continue;
+
+                if (showLineOnly) {
+                    dst.red = (A_u_short)(edge_color.red * strokeCoverage);
+                    dst.green = (A_u_short)(edge_color.green * strokeCoverage);
+                    dst.blue = (A_u_short)(edge_color.blue * strokeCoverage);
+                    dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCoverage);
+                } else {
+                    float strokeA = strokeCoverage;
+                    float invStrokeA = 1.0f - strokeA;
+
+                    float dstR = dst.red / (float)PF_MAX_CHAN16;
+                    float dstG = dst.green / (float)PF_MAX_CHAN16;
+                    float dstB = dst.blue / (float)PF_MAX_CHAN16;
+
+                    float strokeR = edge_color.red / (float)PF_MAX_CHAN16;
+                    float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
+                    float strokeB = edge_color.blue / (float)PF_MAX_CHAN16;
+
+                    float outA = strokeA + dstAlphaNorm * invStrokeA;
+                    float outR = strokeR * strokeA + dstR * invStrokeA;
+                    float outG = strokeG * strokeA + dstG * invStrokeA;
+                    float outB = strokeB * strokeA + dstB * invStrokeA;
+
+                    dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                    dst.red = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                    dst.green = (A_u_short)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                    dst.blue = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                }
+
+                outData[ox] = dst;
+            }
+        }
+    } else {
+        for (A_long oy = 0; oy < output->height; ++oy) {
+            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+            for (A_long ox = 0; ox < output->width; ++ox) {
+                PF_Pixel8 dst = outData[ox];
+                float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
+
+                // Fast reject
+                {
+                    float sdfC = sdfCenterAdjusted(ox, oy);
+                    float distC;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < -MAX_EVAL_DIST) continue;
+                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > MAX_EVAL_DIST) continue;
+                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                    } else {
+                        distC = fabsf(sdfC);
+                    }
+                    if (distC > MAX_EVAL_DIST) continue;
+                }
+
+                float strokeCoverage = 0.0f;
+                for (int s = 0; s < 4; ++s) {
+                    float fx = (float)ox + 0.5f + sampleOffsets[s][0];
+                    float fy = (float)oy + 0.5f + sampleOffsets[s][1];
+                    float sdf = sampleSDF(fx, fy);
+                    strokeCoverage += strokeSampleCoverage(sdf);
+                }
+                strokeCoverage *= 0.25f;
+                if (strokeCoverage < 0.001f) continue;
+
+                if (showLineOnly) {
+                    dst.red = (A_u_char)(color.red * strokeCoverage);
+                    dst.green = (A_u_char)(color.green * strokeCoverage);
+                    dst.blue = (A_u_char)(color.blue * strokeCoverage);
+                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage);
+                } else {
+                    float strokeA = strokeCoverage;
+                    float invStrokeA = 1.0f - strokeA;
+
+                    float dstR = dst.red / (float)PF_MAX_CHAN8;
+                    float dstG = dst.green / (float)PF_MAX_CHAN8;
+                    float dstB = dst.blue / (float)PF_MAX_CHAN8;
+
+                    float strokeR = color.red / (float)PF_MAX_CHAN8;
+                    float strokeG = color.green / (float)PF_MAX_CHAN8;
+                    float strokeB = color.blue / (float)PF_MAX_CHAN8;
+
+                    float outA = strokeA + dstAlphaNorm * invStrokeA;
+                    float outR = strokeR * strokeA + dstR * invStrokeA;
+                    float outG = strokeG * strokeA + dstG * invStrokeA;
+                    float outB = strokeB * strokeA + dstB * invStrokeA;
+
+                    dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                    dst.red = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                    dst.green = (A_u_char)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                    dst.blue = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                }
+
+                outData[ox] = dst;
+            }
+        }
+    }
+
     return err;
 }
 
@@ -875,16 +1417,12 @@ EffectMain(
             err = ParamsSetup(in_data, out_data, params, output);
             break;
 
+        case PF_Cmd_FRAME_SETUP:
+            err = FrameSetup(in_data, out_data, params, output);
+            break;
+
         case PF_Cmd_RENDER:
             err = Render(in_data, out_data, params, output);
-            break;
-
-        case PF_Cmd_SMART_PRE_RENDER:
-            err = PreRender(in_data, out_data, reinterpret_cast<PF_PreRenderExtra*>(extra));
-            break;
-
-        case PF_Cmd_SMART_RENDER:
-            err = SmartRender(in_data, out_data, reinterpret_cast<PF_SmartRenderExtra*>(extra));
             break;
         }
     }
