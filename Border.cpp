@@ -463,8 +463,12 @@ SmartRender(
             float d0 = d00 + (d10 - d00) * tx;
             float d1 = d01 + (d11 - d01) * tx;
             float d = d0 + (d1 - d0) * ty;
-            // No extra shift: keep SDF edge aligned to pixel centers to avoid lateral bias
-            return d * 0.1f;
+            // Move the zero-crossing to the pixel boundary (center between inside/outside)
+            // so "Outside" strokes don't lean by ~1px toward the solid side.
+            float sdf = d * 0.1f;
+            // Subtract half a pixel in the sign direction.
+            sdf -= (sdf >= 0.0f) ? 0.5f : -0.5f;
+            return sdf;
         };
 
         const float sampleOffsets[4][2] = {
