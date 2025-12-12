@@ -527,6 +527,18 @@ SmartRender(
             {-0.25f,  0.25f}, { 0.25f,  0.25f}
         };
 
+        auto sdfCenterAdjusted = [&](A_long ix, A_long iy) -> float {
+            // Center sample without bilinear (fast path), adjusted to boundary (pixel edge).
+            ix = CLAMP(ix, (A_long)0, input->width - 1);
+            iy = CLAMP(iy, (A_long)0, input->height - 1);
+            float sdf = signedDist[(size_t)iy * (size_t)input->width + (size_t)ix] * 0.1f;
+            if (sdf > 0.0f) sdf -= 0.5f;
+            else if (sdf < 0.0f) sdf += 0.5f;
+            return sdf;
+        };
+
+        const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f; // small guard band
+
         auto strokeSampleCoverage = [&](float sdf) -> float {
             // sdf: + inside, - outside (pixels, boundary at 0)
             // Build a soft half-space mask around the boundary to avoid hard sign cuts
@@ -565,6 +577,22 @@ SmartRender(
 
                     PF_Pixel16 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
+
+                    // Fast reject: most pixels are far from the boundary, avoid 2x2 bilinear sampling.
+                    {
+                        float sdfC = sdfCenterAdjusted(ix, iy);
+                        float distC;
+                        if (direction == DIRECTION_INSIDE) {
+                            if (sdfC < -MAX_EVAL_DIST) continue;
+                            distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                        } else if (direction == DIRECTION_OUTSIDE) {
+                            if (sdfC > MAX_EVAL_DIST) continue;
+                            distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                        } else {
+                            distC = fabsf(sdfC);
+                        }
+                        if (distC > MAX_EVAL_DIST) continue;
+                    }
 
                     // 2x2 supersample
                     float strokeCoverage = 0.0f;
@@ -626,6 +654,22 @@ SmartRender(
 
                     PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
+
+                    // Fast reject: most pixels are far from the boundary, avoid 2x2 bilinear sampling.
+                    {
+                        float sdfC = sdfCenterAdjusted(ix, iy);
+                        float distC;
+                        if (direction == DIRECTION_INSIDE) {
+                            if (sdfC < -MAX_EVAL_DIST) continue;
+                            distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                        } else if (direction == DIRECTION_OUTSIDE) {
+                            if (sdfC > MAX_EVAL_DIST) continue;
+                            distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                        } else {
+                            distC = fabsf(sdfC);
+                        }
+                        if (distC > MAX_EVAL_DIST) continue;
+                    }
 
                     float strokeCoverage = 0.0f;
                     for (int s = 0; s < 4; ++s) {
