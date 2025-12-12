@@ -522,6 +522,28 @@ SmartRender(
             {-0.25f,  0.25f}, { 0.25f,  0.25f}
         };
 
+        auto strokeSampleCoverage = [&](float sdf) -> float {
+            // sdf: + inside, - outside (pixels, boundary at 0)
+            // Build a soft half-space mask around the boundary to avoid hard sign cuts
+            // which can look like a 1px lateral bias on AA edges due to interpolation.
+            float sideMask = 1.0f;
+            if (direction == DIRECTION_INSIDE) {
+                // 0 when clearly outside, 1 when inside/on boundary
+                sideMask = smoothstep(-AA_RANGE, 0.0f, sdf);
+                sdf = CLAMP(sdf, 0.0f, 1e9f);
+            } else if (direction == DIRECTION_OUTSIDE) {
+                // 0 when clearly inside, 1 when outside/on boundary
+                sideMask = 1.0f - smoothstep(0.0f, AA_RANGE, sdf);
+                sdf = CLAMP(-sdf, 0.0f, 1e9f);
+            } else {
+                sdf = fabsf(sdf);
+            }
+
+            if (sdf > strokeThicknessF + AA_RANGE) return 0.0f;
+            float stroke = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, sdf);
+            return stroke * sideMask;
+        };
+
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
             edge_color.alpha = PF_MAX_CHAN16;
@@ -546,26 +568,7 @@ SmartRender(
                         float fx = (float)ix + 0.5f + sampleOffsets[s][0];
                         float fy = (float)iy + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy); // + inside, - outside
-
-                        float dist;
-                        switch (direction) {
-                        case DIRECTION_INSIDE:
-                            if (sdf <= 0.0f) continue;   // only inside
-                            dist =  sdf;
-                            break;
-                        case DIRECTION_OUTSIDE:
-                            if (sdf >= 0.0f) continue;   // only outside
-                            dist = -sdf;
-                            break;
-                        default: /* both */
-                            dist = fabsf(sdf);
-                            break;
-                        }
-                        if (dist > strokeThicknessF + AA_RANGE) continue;
-
-                        // Coverage: 1 inside the stroke (dist < thickness), then smooth falloff over AA_RANGE
-                        float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                        strokeCoverage += coverage;
+                        strokeCoverage += strokeSampleCoverage(sdf);
                     }
 
                     strokeCoverage *= 0.25f; // average 4 samples
@@ -625,25 +628,7 @@ SmartRender(
                         float fx = (float)ix + 0.5f + sampleOffsets[s][0];
                         float fy = (float)iy + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy);
-
-                        float dist;
-                        switch (direction) {
-                        case DIRECTION_INSIDE:
-                            if (sdf <= 0.0f) continue;   // only inside
-                            dist =  sdf;
-                            break;
-                        case DIRECTION_OUTSIDE:
-                            if (sdf >= 0.0f) continue;   // only outside
-                            dist = -sdf;
-                            break;
-                        default:
-                            dist = fabsf(sdf);
-                            break;
-                        }
-                        if (dist > strokeThicknessF + AA_RANGE) continue;
-
-                        float coverage = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, dist);
-                        strokeCoverage += coverage;
+                        strokeCoverage += strokeSampleCoverage(sdf);
                     }
 
                     strokeCoverage *= 0.25f;
