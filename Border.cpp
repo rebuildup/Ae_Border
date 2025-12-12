@@ -280,6 +280,7 @@ PreRender(
     PF_Err err = PF_Err_NONE;
     PF_RenderRequest req = extra->input->output_request;
     PF_CheckoutResult in_result;
+    AEFX_CLR_STRUCT(in_result);
 
     PF_ParamDef thickness_param;
     AEFX_CLR_STRUCT(thickness_param);
@@ -333,24 +334,36 @@ PreRender(
     // pixels beyond the requested rect. SmartFX supports this via RETURNS_EXTRA_PIXELS.
     // If we don't set it, AE may clip the stroke to the layer bounds regardless of "Grow Bounds".
     PF_Rect result_rect = request_rect;
-    PF_Rect max_rect = request_rect;
+    PF_Rect max_rect = in_result.max_result_rect;
 
-    // Prefer stable max rect from the checkout result when available.
-    // (This represents the max area the input can provide for this effect chain.)
-    max_rect = in_result.max_result_rect;
+    auto expand_rect = [](PF_Rect& r, A_long e) {
+        r.left   -= e;
+        r.top    -= e;
+        r.right  += e;
+        r.bottom += e;
+    };
+
+    auto intersect_rect = [](const PF_Rect& a, const PF_Rect& b) -> PF_Rect {
+        PF_Rect o;
+        o.left   = MAX(a.left,   b.left);
+        o.top    = MAX(a.top,    b.top);
+        o.right  = MIN(a.right,  b.right);
+        o.bottom = MIN(a.bottom, b.bottom);
+        if (o.right < o.left)   o.right = o.left;
+        if (o.bottom < o.top)   o.bottom = o.top;
+        return o;
+    };
 
     if (direction != DIRECTION_INSIDE && borderExpansion > 0) {
         extra->output->flags |= PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
 
-        result_rect.left   -= borderExpansion;
-        result_rect.top    -= borderExpansion;
-        result_rect.right  += borderExpansion;
-        result_rect.bottom += borderExpansion;
+        expand_rect(result_rect, borderExpansion);
+        expand_rect(max_rect, borderExpansion);
 
-        max_rect.left   -= borderExpansion;
-        max_rect.top    -= borderExpansion;
-        max_rect.right  += borderExpansion;
-        max_rect.bottom += borderExpansion;
+        // Some hosts are strict about max_result_rect validity; keep result_rect within max_rect.
+        // If the input (or upstream effects/masks) cannot provide pixels beyond max_rect,
+        // we must not claim we can output them.
+        result_rect = intersect_rect(result_rect, max_rect);
     }
 
     extra->output->result_rect     = result_rect;
