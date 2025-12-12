@@ -47,11 +47,9 @@ resource 'PiPL' (16000) {
         /* [10] */
         // These literals equal PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT
         AE_Effect_Global_OutFlags  { 0x02000440 },
-        AE_Effect_Global_OutFlags_2 {
-            PF_OutFlag2_SUPPORTS_SMART_RENDER |
-            PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
-            PF_OutFlag2_REVEALS_ZERO_ALPHA
-        },
+        // NOTE: PiPLTool requires a numeric literal here (no macros/expressions).
+        // Runtime flags are set in GlobalSetup as well.
+        AE_Effect_Global_OutFlags_2 { 0x08000400 },
         /* [11] */
         AE_Effect_Match_Name {
             "361do Border"
