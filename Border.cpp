@@ -106,7 +106,7 @@ ParamsSetup(
         BORDER_THRESHOLD_MAX,
         0,
         255,
-        0,
+        BORDER_THRESHOLD_DFLT,
         THRESHOLD_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -154,10 +154,10 @@ ComputeSignedDistanceField(
     auto isSolid = [&](A_long x, A_long y)->bool {
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha > threshold16;
+            return p->alpha >= threshold16;
         } else {
             PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha > threshold8;
+            return p->alpha >= threshold8;
         }
     };
 
