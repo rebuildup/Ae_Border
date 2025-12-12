@@ -322,18 +322,10 @@ PreRender(
 
     PF_Rect request_rect = extra->input->output_request.rect;
 
-    // Expand output extents when drawing outside/both, so AE allocates enough pixels
-    // for the stroke instead of clipping (which looks like a lateral shift).
-    PF_Rect out_rect = request_rect;
-    if (direction != DIRECTION_INSIDE && borderExpansion > 0) {
-        out_rect.left   -= borderExpansion;
-        out_rect.top    -= borderExpansion;
-        out_rect.right  += borderExpansion;
-        out_rect.bottom += borderExpansion;
-    }
-
-    extra->output->result_rect     = out_rect;
-    extra->output->max_result_rect = out_rect;
+    // Output must not exceed the host's request rect in SMART_PRE_RENDER.
+    // (Some hosts are strict and will error if we expand it.)
+    extra->output->result_rect     = request_rect;
+    extra->output->max_result_rect = request_rect;
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);
@@ -454,38 +446,32 @@ SmartRender(
         // STEP 2: Copy the source layer if not "show line only"
         if (!showLineOnly) {
             if (PF_WORLD_IS_DEEP(output)) {
-                for (A_long y = 0; y < input->height; y++) {
-                    A_long outY = y + offsetY;
+                for (A_long oy = 0; oy < output->height; ++oy) {
+                    A_long iy = oy - offsetY;
+                    if (iy < 0 || iy >= input->height) continue;
 
-                    if (outY < 0 || outY >= output->height) continue;
+                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+                    PF_Pixel16* inData  = (PF_Pixel16*)((char*)input->data  + iy * input->rowbytes);
 
-                    PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-
-                    for (A_long x = 0; x < input->width; x++) {
-                        A_long outX = x + offsetX;
-
-                        if (outX < 0 || outX >= output->width) continue;
-
-                        outData[outX] = inData[x];
+                    for (A_long ox = 0; ox < output->width; ++ox) {
+                        A_long ix = ox - offsetX;
+                        if (ix < 0 || ix >= input->width) continue;
+                        outData[ox] = inData[ix];
                     }
                 }
             }
             else {
-                for (A_long y = 0; y < input->height; y++) {
-                    A_long outY = y + offsetY;
+                for (A_long oy = 0; oy < output->height; ++oy) {
+                    A_long iy = oy - offsetY;
+                    if (iy < 0 || iy >= input->height) continue;
 
-                    if (outY < 0 || outY >= output->height) continue;
+                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+                    PF_Pixel8* inData  = (PF_Pixel8*)((char*)input->data  + iy * input->rowbytes);
 
-                    PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-
-                    for (A_long x = 0; x < input->width; x++) {
-                        A_long outX = x + offsetX;
-
-                        if (outX < 0 || outX >= output->width) continue;
-
-                        outData[outX] = inData[x];
+                    for (A_long ox = 0; ox < output->width; ++ox) {
+                        A_long ix = ox - offsetX;
+                        if (ix < 0 || ix >= input->width) continue;
+                        outData[ox] = inData[ix];
                     }
                 }
             }
@@ -539,25 +525,22 @@ SmartRender(
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            for (A_long y = 0; y < input->height; y++) {
-                A_long outY = y + offsetY;
-                if (outY < 0 || outY >= output->height) continue;
-                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + outY * output->rowbytes);
-                PF_Pixel16* srcData = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+            for (A_long oy = 0; oy < output->height; ++oy) {
+                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+                for (A_long ox = 0; ox < output->width; ++ox) {
+                    A_long ix = ox - offsetX;
+                    A_long iy = oy - offsetY;
+                    if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) continue;
 
-                for (A_long x = 0; x < input->width; x++) {
-                    A_long outX = x + offsetX;
-                    if (outX < 0 || outX >= output->width) continue;
-
-                    PF_Pixel16 dst = outData[outX];
+                    PF_Pixel16 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
                     // 2x2 supersample
                     float strokeCoverage = 0.0f;
                     for (int s = 0; s < 4; ++s) {
                         // Sample in input pixel space (x/y are input indices).
-                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        float fx = (float)ix + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)iy + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy); // + inside, - outside
 
                         float dist;
@@ -617,29 +600,26 @@ SmartRender(
                         dst.blue  = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                     }
 
-                    outData[outX] = dst;
+                    outData[ox] = dst;
                 }
             }
         }
         else {
-            for (A_long y = 0; y < input->height; y++) {
-                A_long outY = y + offsetY;
-                if (outY < 0 || outY >= output->height) continue;
-                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + outY * output->rowbytes);
-                PF_Pixel8* srcData = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+            for (A_long oy = 0; oy < output->height; ++oy) {
+                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+                for (A_long ox = 0; ox < output->width; ++ox) {
+                    A_long ix = ox - offsetX;
+                    A_long iy = oy - offsetY;
+                    if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) continue;
 
-                for (A_long x = 0; x < input->width; x++) {
-                    A_long outX = x + offsetX;
-                    if (outX < 0 || outX >= output->width) continue;
-
-                    PF_Pixel8 dst = outData[outX];
+                    PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
                     float strokeCoverage = 0.0f;
                     for (int s = 0; s < 4; ++s) {
                         // Sample in input pixel space (x/y are input indices).
-                        float fx = (float)x + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)y + 0.5f + sampleOffsets[s][1];
+                        float fx = (float)ix + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)iy + 0.5f + sampleOffsets[s][1];
                         float sdf = sampleSDF(fx, fy);
 
                         float dist;
@@ -697,7 +677,7 @@ SmartRender(
                         dst.blue  = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                     }
 
-                    outData[outX] = dst;
+                    outData[ox] = dst;
                 }
             }
         }
