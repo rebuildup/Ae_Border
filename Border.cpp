@@ -318,8 +318,9 @@ PreRender(
     req.rect.bottom += borderExpansion;
     ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
-    // Pass the actual checkout_id to SmartRender.
-    extra->output->pre_render_data = (void*)(intptr_t)in_result.checkout_id;
+    // Store the checkout_id we provided to checkout_layer() (the second BORDER_INPUT argument).
+    // Not all SDKs expose an id field in PF_CheckoutResult.
+    extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
 
     PF_Rect request_rect = extra->input->output_request.rect;
 
