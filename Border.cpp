@@ -417,8 +417,10 @@ SmartRender(
 
         // Generate signed distance field (fast chamfer, scaled by 10)
         std::vector<int> signedDist;
-        A_u_short threshold16 = threshold * 257;
-        ERR(ComputeSignedDistanceField(input, threshold, threshold16, signedDist,
+        // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
+        A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
+        A_u_short thresholdSdf16 = thresholdSdf8 * 257;
+        ERR(ComputeSignedDistanceField(input, thresholdSdf8, thresholdSdf16, signedDist,
             input->width, input->height));
 
         // STEP 1: Clear the output buffer to transparency
