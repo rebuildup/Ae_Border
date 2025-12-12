@@ -344,23 +344,33 @@ PreRender(
     // Not all SDKs expose an id field in PF_CheckoutResult.
     extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
 
-    PF_Rect request_rect = extra->input->output_request.rect;
+    PF_LRect request_rect = extra->input->output_request.rect;
 
     // For Shape/Text layers the layer bounds can be tight; when drawing Outside/Both we need
     // pixels beyond the requested rect. SmartFX supports this via RETURNS_EXTRA_PIXELS.
     // If we don't set it, AE may clip the stroke to the layer bounds regardless of "Grow Bounds".
-    PF_Rect result_rect = request_rect;
-    PF_Rect max_rect = in_result.max_result_rect;
+    PF_LRect result_rect = request_rect;
 
-    auto expand_rect = [](PF_Rect& r, A_long e) {
+    // max_result_rect must be stable (not depend on requested size).
+    // For Shape/Text layers, checkout_layer's max_result_rect can be tightly cropped to non-zero alpha,
+    // which prevents drawing Outside bounds. Prefer the reference layer size when available.
+    PF_LRect max_rect = in_result.max_result_rect;
+    if (in_result.ref_width > 0 && in_result.ref_height > 0) {
+        max_rect.left = 0;
+        max_rect.top = 0;
+        max_rect.right = in_result.ref_width;
+        max_rect.bottom = in_result.ref_height;
+    }
+
+    auto expand_rect = [](PF_LRect& r, A_long e) {
         r.left   -= e;
         r.top    -= e;
         r.right  += e;
         r.bottom += e;
     };
 
-    auto intersect_rect = [](const PF_Rect& a, const PF_Rect& b) -> PF_Rect {
-        PF_Rect o;
+    auto intersect_rect = [](const PF_LRect& a, const PF_LRect& b) -> PF_LRect {
+        PF_LRect o;
         o.left   = MAX(a.left,   b.left);
         o.top    = MAX(a.top,    b.top);
         o.right  = MIN(a.right,  b.right);
@@ -375,9 +385,7 @@ PreRender(
 
         expand_rect(result_rect, borderExpansion);
 
-        // Keep result_rect within max_rect. If upstream limits max_result_rect to the layer bounds,
-        // we cannot output beyond that. With PF_OutFlag2_REVEALS_ZERO_ALPHA, AE is less likely to
-        // crop max_result_rect for Shape/Text layers.
+        // Keep result_rect within max_rect.
         result_rect = intersect_rect(result_rect, max_rect);
     }
 
