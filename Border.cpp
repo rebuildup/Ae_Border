@@ -288,6 +288,12 @@ PreRender(
 {
     PF_Err err = PF_Err_NONE;
     PF_RenderRequest req = extra->input->output_request;
+
+    // SmartFX checkout ids must be unique within a pre-render.
+    // Keep them positive to satisfy stricter hosts.
+    const A_long kCheckoutIdInput  = 1;
+    const A_long kCheckoutIdBounds = 2;
+
     PF_CheckoutResult in_result;
     AEFX_CLR_STRUCT(in_result);
 
@@ -335,19 +341,36 @@ PreRender(
         borderExpansion = (A_long)ceil((outsideThicknessPx / resolution_factor) + AA_RANGE_PX + SAMPLE_GUARD_PX);
     }
 
-    // Ask AE for a slightly larger input region so we can sample beyond the request
-    // when drawing the border. Output rect itself must stay within the host's request.
-    if (borderExpansion > 0) {
-        req.rect.left   -= borderExpansion;
-        req.rect.top    -= borderExpansion;
-        req.rect.right  += borderExpansion;
-        req.rect.bottom += borderExpansion;
+    // 1) Bounds checkout with empty request_rect: lets AE compute input max_result_rect
+    // without requiring us to render pixels. This is the recommended way to get stable
+    // layer bounds in SmartFX.
+    PF_CheckoutResult bounds_result;
+    AEFX_CLR_STRUCT(bounds_result);
+    {
+        PF_RenderRequest boundsReq = req;
+        boundsReq.rect.left = boundsReq.rect.top = boundsReq.rect.right = boundsReq.rect.bottom = 0; // empty
+        ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, kCheckoutIdBounds, &boundsReq,
+            in_data->current_time, in_data->time_step, in_data->time_scale, &bounds_result));
     }
-    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
-    // Store the checkout_id we provided to checkout_layer() (the second BORDER_INPUT argument).
-    // Not all SDKs expose an id field in PF_CheckoutResult.
-    extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
+    // 2) Pixel checkout: request the output area expanded by the stroke so we can compute SDF
+    // and draw in the expanded region (outside the original layer bounds when allowed).
+    PF_RenderRequest pixReq = req;
+    if (borderExpansion > 0) {
+        // Extra guard for bilinear + 2x2 sampling near the edge.
+        const A_long inputGuard = 2;
+        const A_long inputExpansion = borderExpansion + inputGuard;
+        pixReq.rect.left   -= inputExpansion;
+        pixReq.rect.top    -= inputExpansion;
+        pixReq.rect.right  += inputExpansion;
+        pixReq.rect.bottom += inputExpansion;
+    }
+
+    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, kCheckoutIdInput, &pixReq,
+        in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
+
+    // Store the checkout_id we provided to checkout_layer() for pixels.
+    extra->output->pre_render_data = (void*)(intptr_t)kCheckoutIdInput;
 
     PF_LRect request_rect = extra->input->output_request.rect;
 
@@ -357,15 +380,8 @@ PreRender(
     PF_LRect result_rect = request_rect;
 
     // max_result_rect must be stable (not depend on requested size).
-    // For Shape/Text layers, checkout_layer's max_result_rect can be tightly cropped to non-zero alpha,
-    // which prevents drawing Outside bounds. Prefer the reference layer size when available.
-    PF_LRect max_rect = in_result.max_result_rect;
-    if (in_result.ref_width > 0 && in_result.ref_height > 0) {
-        max_rect.left = 0;
-        max_rect.top = 0;
-        max_rect.right = in_result.ref_width;
-        max_rect.bottom = in_result.ref_height;
-    }
+    // Use the bounds checkout as the base input bounds.
+    PF_LRect max_rect = bounds_result.max_result_rect;
 
     auto expand_rect = [](PF_LRect& r, A_long e) {
         r.left   -= e;
@@ -389,6 +405,9 @@ PreRender(
         extra->output->flags |= PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
 
         expand_rect(result_rect, borderExpansion);
+
+        // Expand max_result_rect by the possible output growth from the stroke.
+        expand_rect(max_rect, borderExpansion);
 
         // Keep result_rect within max_rect.
         result_rect = intersect_rect(result_rect, max_rect);
