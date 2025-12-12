@@ -25,3 +25,4 @@ AeSDK 付属の Examples ツリー内でビルドできるようにしてあり�
 - Smart Render では、ホストが要求する `output_request.rect` がレイヤー境界でタイトに切られることがあります。
 - `Outside` / `Both` で境界外にも描画するため、`PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS` を使って `result_rect/max_result_rect` を拡張しています。
 - さらに `PF_OutFlag2_REVEALS_ZERO_ALPHA` を有効にし、AEが「非ゼロαの領域だけ」に `max_result_rect` をクロップしてしまうのを避けています（Shape/Textで重要）。
+- 拡張量は固定値ではなく、`Outside/Both` のストローク幅（ピクセル換算）＋AA/サンプル分から計算します。

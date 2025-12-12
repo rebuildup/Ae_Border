@@ -313,19 +313,31 @@ PreRender(
     float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
-    float effectiveThickness = pixelThickness;
-    if (direction == DIRECTION_BOTH) {
-        effectiveThickness = pixelThickness / 2.0f;
+    // Compute how many pixels we may need *outside* the layer bounds.
+    // Avoid arbitrary padding: expand by the outside stroke thickness + AA/support.
+    const float AA_RANGE_PX = 1.0f;
+    const float SAMPLE_GUARD_PX = 1.0f; // covers bilinear + 2x2 sample offsets safely
+
+    float outsideThicknessPx = 0.0f;
+    if (direction == DIRECTION_OUTSIDE) {
+        outsideThicknessPx = pixelThickness;
+    } else if (direction == DIRECTION_BOTH) {
+        outsideThicknessPx = pixelThickness * 0.5f;
     }
 
-    A_long borderExpansion = (A_long)ceil(effectiveThickness / resolution_factor) + 5;
+    A_long borderExpansion = 0;
+    if (outsideThicknessPx > 0.0f) {
+        borderExpansion = (A_long)ceil((outsideThicknessPx / resolution_factor) + AA_RANGE_PX + SAMPLE_GUARD_PX);
+    }
 
     // Ask AE for a slightly larger input region so we can sample beyond the request
     // when drawing the border. Output rect itself must stay within the host's request.
-    req.rect.left   -= borderExpansion;
-    req.rect.top    -= borderExpansion;
-    req.rect.right  += borderExpansion;
-    req.rect.bottom += borderExpansion;
+    if (borderExpansion > 0) {
+        req.rect.left   -= borderExpansion;
+        req.rect.top    -= borderExpansion;
+        req.rect.right  += borderExpansion;
+        req.rect.bottom += borderExpansion;
+    }
     ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
     // Store the checkout_id we provided to checkout_layer() (the second BORDER_INPUT argument).
