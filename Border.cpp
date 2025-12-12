@@ -106,7 +106,7 @@ ParamsSetup(
         BORDER_THRESHOLD_MAX,
         0,
         255,
-        BORDER_THRESHOLD_DFLT,
+        0,
         THRESHOLD_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
@@ -154,10 +154,10 @@ ComputeSignedDistanceField(
     auto isSolid = [&](A_long x, A_long y)->bool {
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha >= threshold16;
+            return p->alpha > threshold16;
         } else {
             PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha >= threshold8;
+            return p->alpha > threshold8;
         }
     };
 
@@ -318,7 +318,8 @@ PreRender(
     req.rect.bottom += borderExpansion;
     ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, BORDER_INPUT, &req, in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
-    extra->output->pre_render_data = (void*)(intptr_t)BORDER_INPUT;
+    // Pass the actual checkout_id to SmartRender.
+    extra->output->pre_render_data = (void*)(intptr_t)in_result.checkout_id;
 
     PF_Rect request_rect = extra->input->output_request.rect;
 

@@ -47,9 +47,7 @@ typedef short int			int16;
 
 #define BORDER_THRESHOLD_MIN     0
 #define BORDER_THRESHOLD_MAX     255
-// Default threshold at mid alpha so the border follows the perceived (50%) edge
-// instead of snapping to any non-zero coverage from anti-aliased sources.
-#define BORDER_THRESHOLD_DFLT    128
+#define BORDER_THRESHOLD_DFLT    1
 
 // Direction options
 enum {
