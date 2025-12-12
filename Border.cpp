@@ -463,12 +463,9 @@ SmartRender(
             float d0 = d00 + (d10 - d00) * tx;
             float d1 = d01 + (d11 - d01) * tx;
             float d = d0 + (d1 - d0) * ty;
-            // Move the zero-crossing to the pixel boundary (center between inside/outside)
-            // so "Outside" strokes don't lean by ~1px toward the solid side.
-            float sdf = d * 0.1f;
-            // Subtract half a pixel in the sign direction.
-            sdf -= (sdf >= 0.0f) ? 0.5f : -0.5f;
-            return sdf;
+            // Subpixel bias compensation: the 3-4 chamfer returns 1px at the edge.
+            // Move the zero-crossing to the pixel boundary by subtracting 0.5px.
+            return d * 0.1f - 0.5f;
         };
 
         const float sampleOffsets[4][2] = {
