@@ -131,6 +131,11 @@ ParamsSetup(
 }
 // Fast 3-4 chamfer distance transform (integer, scaled by 10) to compute
 // signed distance to the alpha edge. Positive inside opaque region, negative outside.
+//
+// NOTE:
+// The previous 3-4 chamfer distance had directional bias that could appear as a lateral
+// "shift" of the stroke (especially noticeable on diagonals / sharp corners).
+// We use an exact (grid) Euclidean Distance Transform (EDT) to avoid anisotropy.
 static PF_Err
 ComputeSignedDistanceField(
     PF_EffectWorld* input,
@@ -140,80 +145,122 @@ ComputeSignedDistanceField(
     A_long width,
     A_long height)
 {
-    const int INF = std::numeric_limits<int>::max() / 4;
-    signedDist.assign(width * height, 0);
+    const int INF = 1 << 29;
+    const A_long w = width;
+    const A_long h = height;
 
-    auto idx = [width](A_long x, A_long y) { return y * width + x; };
-
-    std::vector<int> distInside(width * height, INF);
-    std::vector<int> distOutside(width * height, INF);
+    signedDist.assign(w * h, 0);
 
     auto isSolid = [&](A_long x, A_long y)->bool {
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
             return p->alpha > threshold16;
-        }
-        else {
+        } else {
             PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
             return p->alpha > threshold8;
         }
     };
 
-    for (A_long y = 0; y < height; ++y) {
-        for (A_long x = 0; x < width; ++x) {
-            bool solid = isSolid(x, y);
-            if (solid) {
-                distOutside[idx(x, y)] = 0; // seeds for outside distances
+    // 1D squared EDT (Felzenszwalb & Huttenlocher).
+    auto edt1d = [&](const std::vector<int>& f, int n, std::vector<int>& d) {
+        d.resize(n);
+        std::vector<int> v(n);
+        std::vector<float> z(n + 1);
+
+        int k = 0;
+        v[0] = 0;
+        z[0] = -std::numeric_limits<float>::infinity();
+        z[1] =  std::numeric_limits<float>::infinity();
+
+        auto sep = [&](int i, int u)->float {
+            // Intersection of parabolas from i and u.
+            // s = ((f[u] + u^2) - (f[i] + i^2)) / (2u - 2i)
+            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
+        };
+
+        for (int q = 1; q < n; ++q) {
+            float s = sep(v[k], q);
+            while (k > 0 && s <= z[k]) {
+                --k;
+                s = sep(v[k], q);
             }
-            else {
-                distInside[idx(x, y)] = 0;  // seeds for inside distances
+            ++k;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = std::numeric_limits<float>::infinity();
+        }
+
+        k = 0;
+        for (int q = 0; q < n; ++q) {
+            while (z[k + 1] < (float)q) ++k;
+            int dx = q - v[k];
+            d[q] = dx * dx + f[v[k]];
+        }
+    };
+
+    // 2D EDT: first along X (rows), then along Y (columns).
+    auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
+        d2d.assign(w * h, INF);
+
+        // Pass 1: rows
+        std::vector<int> frow((size_t)w);
+        std::vector<int> drow;
+        std::vector<int> tmp(w * h, INF);
+
+        for (A_long y = 0; y < h; ++y) {
+            for (A_long x = 0; x < w; ++x) {
+                frow[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
+            }
+            edt1d(frow, (int)w, drow);
+            for (A_long x = 0; x < w; ++x) {
+                tmp[(size_t)y * (size_t)w + (size_t)x] = drow[(size_t)x];
+            }
+        }
+
+        // Pass 2: columns
+        std::vector<int> fcol((size_t)h);
+        std::vector<int> dcol;
+        for (A_long x = 0; x < w; ++x) {
+            for (A_long y = 0; y < h; ++y) {
+                fcol[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
+            }
+            edt1d(fcol, (int)h, dcol);
+            for (A_long y = 0; y < h; ++y) {
+                d2d[(size_t)y * (size_t)w + (size_t)x] = dcol[(size_t)y];
+            }
+        }
+    };
+
+    // Build 0/INF grids for foreground/background feature points.
+    // dtFg: distance to nearest solid pixel center
+    // dtBg: distance to nearest transparent pixel center
+    std::vector<int> fFg(w * h, INF);
+    std::vector<int> fBg(w * h, INF);
+    for (A_long y = 0; y < h; ++y) {
+        for (A_long x = 0; x < w; ++x) {
+            bool solid = isSolid(x, y);
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            if (solid) {
+                fFg[i] = 0;
+            } else {
+                fBg[i] = 0;
             }
         }
     }
 
-    const int wStraight = 10; // scaled by 10
-    const int wDiag = 14;     // approx sqrt(2)*10
+    std::vector<int> dtFg2, dtBg2;
+    edt2d(fFg, dtFg2);
+    edt2d(fBg, dtBg2);
 
-    auto forwardPass = [&](std::vector<int>& dist) {
-        for (A_long y = 0; y < height; ++y) {
-            for (A_long x = 0; x < width; ++x) {
-                int v = dist[idx(x, y)];
-                if (v == 0) continue;
-                int best = v;
-                if (x > 0)                 best = std::min(best, dist[idx(x - 1, y)] + wStraight);
-                if (y > 0)                 best = std::min(best, dist[idx(x, y - 1)] + wStraight);
-                if (x > 0 && y > 0)        best = std::min(best, dist[idx(x - 1, y - 1)] + wDiag);
-                if (x + 1 < width && y > 0)best = std::min(best, dist[idx(x + 1, y - 1)] + wDiag);
-                dist[idx(x, y)] = best;
-            }
-        }
-    };
-
-    auto backwardPass = [&](std::vector<int>& dist) {
-        for (A_long y = height - 1; y >= 0; --y) {
-            for (A_long x = width - 1; x >= 0; --x) {
-                int v = dist[idx(x, y)];
-                int best = v;
-                if (x + 1 < width)          best = std::min(best, dist[idx(x + 1, y)] + wStraight);
-                if (y + 1 < height)         best = std::min(best, dist[idx(x, y + 1)] + wStraight);
-                if (x + 1 < width && y + 1 < height) best = std::min(best, dist[idx(x + 1, y + 1)] + wDiag);
-                if (x > 0 && y + 1 < height) best = std::min(best, dist[idx(x - 1, y + 1)] + wDiag);
-                dist[idx(x, y)] = best;
-            }
-        }
-    };
-
-    forwardPass(distInside);
-    forwardPass(distOutside);
-    backwardPass(distInside);
-    backwardPass(distOutside);
-
-    signedDist.resize(width * height);
-    for (A_long y = 0; y < height; ++y) {
-        for (A_long x = 0; x < width; ++x) {
-            bool solid = isSolid(x, y);
-            int d = solid ? distInside[idx(x, y)] : distOutside[idx(x, y)];
-            signedDist[idx(x, y)] = solid ? d : -d;
+    // Signed distance (pixels), scaled by 10.
+    // sdf = distToBg - distToFg  => positive inside, negative outside.
+    for (A_long y = 0; y < h; ++y) {
+        for (A_long x = 0; x < w; ++x) {
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            float distToFg = sqrtf((float)dtFg2[i]);
+            float distToBg = sqrtf((float)dtBg2[i]);
+            float sdf = distToBg - distToFg;
+            signedDist[i] = (int)floorf(sdf * 10.0f + (sdf >= 0.0f ? 0.5f : -0.5f));
         }
     }
 
@@ -471,9 +518,13 @@ SmartRender(
             float d0 = d00 + (d10 - d00) * tx;
             float d1 = d01 + (d11 - d01) * tx;
             float d = d0 + (d1 - d0) * ty;
-            // Subpixel bias compensation: the 3-4 chamfer returns 1px at the edge.
-            // Move the zero-crossing to the pixel boundary by subtracting 0.5px.
-            return d * 0.1f - 0.5f;
+            // Convert back to pixels. Our SDF is based on EDT between pixel centers,
+            // so the boundary is halfway between opposite-class pixels.
+            // Adjust by ±0.5px so distance is measured to the boundary (pixel edge).
+            float sdf = d * 0.1f;
+            if (sdf > 0.0f) sdf -= 0.5f;
+            else if (sdf < 0.0f) sdf += 0.5f;
+            return sdf;
         };
 
         const float sampleOffsets[4][2] = {
