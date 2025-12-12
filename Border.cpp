@@ -329,10 +329,32 @@ PreRender(
 
     PF_Rect request_rect = extra->input->output_request.rect;
 
-    // Output must not exceed the host's request rect in SMART_PRE_RENDER.
-    // (Some hosts are strict and will error if we expand it.)
-    extra->output->result_rect     = request_rect;
-    extra->output->max_result_rect = request_rect;
+    // For Shape/Text layers the layer bounds can be tight; when drawing Outside/Both we need
+    // pixels beyond the requested rect. SmartFX supports this via RETURNS_EXTRA_PIXELS.
+    // If we don't set it, AE may clip the stroke to the layer bounds regardless of "Grow Bounds".
+    PF_Rect result_rect = request_rect;
+    PF_Rect max_rect = request_rect;
+
+    // Prefer stable max rect from the checkout result when available.
+    // (This represents the max area the input can provide for this effect chain.)
+    max_rect = in_result.max_result_rect;
+
+    if (direction != DIRECTION_INSIDE && borderExpansion > 0) {
+        extra->output->flags |= PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
+
+        result_rect.left   -= borderExpansion;
+        result_rect.top    -= borderExpansion;
+        result_rect.right  += borderExpansion;
+        result_rect.bottom += borderExpansion;
+
+        max_rect.left   -= borderExpansion;
+        max_rect.top    -= borderExpansion;
+        max_rect.right  += borderExpansion;
+        max_rect.bottom += borderExpansion;
+    }
+
+    extra->output->result_rect     = result_rect;
+    extra->output->max_result_rect = max_rect;
 
     PF_CHECKIN_PARAM(in_data, &thickness_param);
     PF_CHECKIN_PARAM(in_data, &direction_param);

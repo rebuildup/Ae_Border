@@ -20,3 +20,7 @@ AeSDK 付属の Examples ツリー内でビルドできるようにしてあり�
 - SMART_RENDER のタイル処理を前提に、EDTの1D処理で使うバッファは `thread_local` で再利用し、行/列ごとのヒープ確保を抑えています。
 - 描画側は、SDFの中心値で「境界から十分遠いピクセル」を早期スキップし、境界付近だけ 2x2 の supersample を行います（複雑な輪郭ほど効果が出ます）。
 - それでも EDT + 2x2 supersample は重めなので、超高解像度・太いボーダーでは計算量が増えます（入力チェックアウト領域が広がるため）。
+
+## Shape/Text で外側が切れる場合
+- Smart Render では、ホストが要求する `output_request.rect` がレイヤー境界でタイトに切られることがあります。
+- `Outside` / `Both` で境界外にも描画するため、`PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS` を使って `result_rect/max_result_rect` を拡張しています。
