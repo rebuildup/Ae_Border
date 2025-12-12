@@ -380,8 +380,16 @@ PreRender(
     PF_LRect result_rect = request_rect;
 
     // max_result_rect must be stable (not depend on requested size).
-    // Use the bounds checkout as the base input bounds.
+    // Use the reference layer size as the base bounds when available.
+    // For Shape/Text layers, max_result_rect from checkout can be tightly cropped,
+    // but ref_width/ref_height represent the full layer raster space (comp size for collapsed layers).
     PF_LRect max_rect = bounds_result.max_result_rect;
+    if (bounds_result.ref_width > 0 && bounds_result.ref_height > 0) {
+        max_rect.left = 0;
+        max_rect.top = 0;
+        max_rect.right = bounds_result.ref_width;
+        max_rect.bottom = bounds_result.ref_height;
+    }
 
     auto expand_rect = [](PF_LRect& r, A_long e) {
         r.left   -= e;
