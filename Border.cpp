@@ -162,18 +162,20 @@ ComputeSignedDistanceField(
     };
 
     // 1D squared EDT (Felzenszwalb & Huttenlocher).
-    auto edt1d = [&](const std::vector<int>& f, int n, std::vector<int>& d) {
-        d.resize(n);
-        std::vector<int> v(n);
-        std::vector<float> z(n + 1);
+    // Uses scratch buffers to avoid per-row/col allocations (important for SMART_RENDER tiling).
+    auto edt1d = [&](const int* f, int n, int* d, std::vector<int>& v, std::vector<float>& z) {
+        if ((int)v.size() < n) v.resize(n);
+        if ((int)z.size() < n + 1) z.resize(n + 1);
+
+        const float INF_F = std::numeric_limits<float>::infinity();
 
         int k = 0;
         v[0] = 0;
-        z[0] = -std::numeric_limits<float>::infinity();
-        z[1] =  std::numeric_limits<float>::infinity();
+        z[0] = -INF_F;
+        z[1] =  INF_F;
 
         auto sep = [&](int i, int u)->float {
-            // Intersection of parabolas from i and u.
+            // Intersection of parabolas from i and u:
             // s = ((f[u] + u^2) - (f[i] + i^2)) / (2u - 2i)
             return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
         };
@@ -187,7 +189,7 @@ ComputeSignedDistanceField(
             ++k;
             v[k] = q;
             z[k] = s;
-            z[k + 1] = std::numeric_limits<float>::infinity();
+            z[k + 1] = INF_F;
         }
 
         k = 0;
@@ -199,35 +201,38 @@ ComputeSignedDistanceField(
     };
 
     // 2D EDT: first along X (rows), then along Y (columns).
+    // Scratch buffers reused across calls (thread-safe across AE's threaded rendering).
+    thread_local std::vector<int> vScratch;
+    thread_local std::vector<float> zScratch;
+    thread_local std::vector<int> lineIn;
+    thread_local std::vector<int> lineOut;
+    thread_local std::vector<int> tmp;
+
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
         d2d.assign(w * h, INF);
 
-        // Pass 1: rows
-        std::vector<int> frow((size_t)w);
-        std::vector<int> drow;
-        std::vector<int> tmp(w * h, INF);
+        // Ensure temp buffer matches current size.
+        if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
 
+        // Pass 1: rows
         for (A_long y = 0; y < h; ++y) {
-            for (A_long x = 0; x < w; ++x) {
-                frow[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
-            }
-            edt1d(frow, (int)w, drow);
-            for (A_long x = 0; x < w; ++x) {
-                tmp[(size_t)y * (size_t)w + (size_t)x] = drow[(size_t)x];
-            }
+            lineIn.resize((size_t)w);
+            lineOut.resize((size_t)w);
+            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
+
+            edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
+            for (A_long x = 0; x < w; ++x) tmp[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
         }
 
         // Pass 2: columns
-        std::vector<int> fcol((size_t)h);
-        std::vector<int> dcol;
         for (A_long x = 0; x < w; ++x) {
-            for (A_long y = 0; y < h; ++y) {
-                fcol[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
-            }
-            edt1d(fcol, (int)h, dcol);
-            for (A_long y = 0; y < h; ++y) {
-                d2d[(size_t)y * (size_t)w + (size_t)x] = dcol[(size_t)y];
-            }
+            lineIn.resize((size_t)h);
+            lineOut.resize((size_t)h);
+            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
+
+            edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
+
+            for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
         }
     };
 
