@@ -57,7 +57,11 @@ GlobalSetup(
     out_data->my_version = BORDER_VERSION_VALUE;
 
     out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
+    // REVEALS_ZERO_ALPHA is important for Shape/Text layers: AE may otherwise crop
+    // the renderable rect to non-zero alpha, which prevents drawing Outside bounds.
+    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
+                           PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
+                           PF_OutFlag2_REVEALS_ZERO_ALPHA;
 
     return PF_Err_NONE;
 }
@@ -358,11 +362,10 @@ PreRender(
         extra->output->flags |= PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
 
         expand_rect(result_rect, borderExpansion);
-        expand_rect(max_rect, borderExpansion);
 
-        // Some hosts are strict about max_result_rect validity; keep result_rect within max_rect.
-        // If the input (or upstream effects/masks) cannot provide pixels beyond max_rect,
-        // we must not claim we can output them.
+        // Keep result_rect within max_rect. If upstream limits max_result_rect to the layer bounds,
+        // we cannot output beyond that. With PF_OutFlag2_REVEALS_ZERO_ALPHA, AE is less likely to
+        // crop max_result_rect for Shape/Text layers.
         result_rect = intersect_rect(result_rect, max_rect);
     }
 
