@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <limits>
+#include <cstring>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -27,6 +28,55 @@ struct EdgePoint {
     A_long x, y;
     bool isTransparent;
 };
+
+struct BorderRectI {
+    A_long left, top, right, bottom; // inclusive
+};
+
+static bool
+BorderGetSolidBounds(
+    PF_EffectWorld* input,
+    A_u_char threshold8,
+    A_u_short threshold16,
+    BorderRectI& outBounds)
+{
+    const A_long w = input->width;
+    const A_long h = input->height;
+    A_long minX = w, minY = h, maxX = -1, maxY = -1;
+
+    if (PF_WORLD_IS_DEEP(input)) {
+        for (A_long y = 0; y < h; ++y) {
+            PF_Pixel16* row = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+            for (A_long x = 0; x < w; ++x) {
+                if (row[x].alpha > threshold16) {
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+    } else {
+        for (A_long y = 0; y < h; ++y) {
+            PF_Pixel8* row = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+            for (A_long x = 0; x < w; ++x) {
+                if (row[x].alpha > threshold8) {
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) return false;
+    outBounds.left = minX;
+    outBounds.top = minY;
+    outBounds.right = maxX;
+    outBounds.bottom = maxY;
+    return true;
+}
 
 static PF_Err
 About(
@@ -300,10 +350,11 @@ ComputeSignedDistanceField(
     thread_local std::vector<int> tmp;
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
-        d2d.assign(w * h, INF);
+        // Column pass writes every element; no need to prefill with INF.
+        d2d.resize((size_t)w * (size_t)h);
 
-        // Ensure temp buffer matches current size.
-        if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
+        // Row pass writes every element; no need to prefill.
+        if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
 
         // Pass 1: rows
         lineIn.resize((size_t)w);
@@ -422,9 +473,11 @@ ComputeSignedDistanceFieldFromSolid(
     thread_local std::vector<int> tmp;
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
-        d2d.assign(w * h, INF);
+        // Column pass writes every element; no need to prefill with INF.
+        d2d.resize((size_t)w * (size_t)h);
 
-        if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
+        // Row pass writes every element; no need to prefill.
+        if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
 
         lineIn.resize((size_t)w);
         lineOut.resize((size_t)w);
@@ -953,74 +1006,114 @@ Render(
     float thicknessF = (float)thicknessInt;
     float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
 
-    if (strokeThicknessF <= 0.0f) {
-        // Nothing to draw; copy input unless line-only.
-        if (!showLineOnly) {
-            if (PF_WORLD_IS_DEEP(output)) {
-                for (A_long y = 0; y < output->height; ++y) {
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-                    for (A_long x = 0; x < output->width; ++x) {
-                        outData[x].alpha = 0;
-                        outData[x].red = outData[x].green = outData[x].blue = 0;
-                    }
-                }
-            } else {
-                for (A_long y = 0; y < output->height; ++y) {
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-                    for (A_long x = 0; x < output->width; ++x) {
-                        outData[x].alpha = 0;
-                        outData[x].red = outData[x].green = outData[x].blue = 0;
-                    }
-                }
+    const A_long originX = in_data->output_origin_x;
+    const A_long originY = in_data->output_origin_y;
+
+    const A_long outW = output->width;
+    const A_long outH = output->height;
+    const A_long inW = input->width;
+    const A_long inH = input->height;
+
+    const A_long outStartX = MAX((A_long)0, originX);
+    const A_long outStartY = MAX((A_long)0, originY);
+    const A_long inStartX = MAX((A_long)0, -originX);
+    const A_long inStartY = MAX((A_long)0, -originY);
+    const A_long copyW = MIN(inW - inStartX, outW - outStartX);
+    const A_long copyH = MIN(inH - inStartY, outH - outStartY);
+
+    // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
+    const A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
+    const A_u_short thresholdSdf16 = thresholdSdf8 * 257;
+
+    // Output base: either fully transparent (line-only) or input copied into expanded output
+    // with only the non-overlapping bands cleared.
+    if (PF_WORLD_IS_DEEP(output)) {
+        const size_t pxSize = sizeof(PF_Pixel16);
+        for (A_long oy = 0; oy < outH; ++oy) {
+            PF_Pixel16* outRow = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+            const bool overlapsY = (!showLineOnly && copyH > 0 && oy >= outStartY && oy < (outStartY + copyH));
+            if (!overlapsY) {
+                memset(outRow, 0, (size_t)outW * pxSize);
+                continue;
             }
 
-            const A_long originX = in_data->output_origin_x;
-            const A_long originY = in_data->output_origin_y;
-            if (PF_WORLD_IS_DEEP(output)) {
-                for (A_long oy = 0; oy < output->height; ++oy) {
-                    A_long iy = oy - originY;
-                    if (iy < 0 || iy >= input->height) continue;
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
-                    PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
-                    for (A_long ox = 0; ox < output->width; ++ox) {
-                        A_long ix = ox - originX;
-                        if (ix < 0 || ix >= input->width) continue;
-                        outData[ox] = inData[ix];
-                    }
-                }
-            } else {
-                for (A_long oy = 0; oy < output->height; ++oy) {
-                    A_long iy = oy - originY;
-                    if (iy < 0 || iy >= input->height) continue;
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
-                    PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
-                    for (A_long ox = 0; ox < output->width; ++ox) {
-                        A_long ix = ox - originX;
-                        if (ix < 0 || ix >= input->width) continue;
-                        outData[ox] = inData[ix];
-                    }
-                }
+            // Clear only the left/right bands (outside the copied source span).
+            if (outStartX > 0) {
+                memset(outRow, 0, (size_t)outStartX * pxSize);
+            }
+            const A_long rightStart = outStartX + copyW;
+            if (rightStart < outW) {
+                memset(outRow + rightStart, 0, (size_t)(outW - rightStart) * pxSize);
+            }
+
+            // Copy the contiguous source span.
+            const A_long iy = (oy - outStartY) + inStartY;
+            PF_Pixel16* inRow = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
+            if (copyW > 0) {
+                memcpy(outRow + outStartX, inRow + inStartX, (size_t)copyW * pxSize);
             }
         }
+    } else {
+        const size_t pxSize = sizeof(PF_Pixel8);
+        for (A_long oy = 0; oy < outH; ++oy) {
+            PF_Pixel8* outRow = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+            const bool overlapsY = (!showLineOnly && copyH > 0 && oy >= outStartY && oy < (outStartY + copyH));
+            if (!overlapsY) {
+                memset(outRow, 0, (size_t)outW * pxSize);
+                continue;
+            }
+
+            if (outStartX > 0) {
+                memset(outRow, 0, (size_t)outStartX * pxSize);
+            }
+            const A_long rightStart = outStartX + copyW;
+            if (rightStart < outW) {
+                memset(outRow + rightStart, 0, (size_t)(outW - rightStart) * pxSize);
+            }
+
+            const A_long iy = (oy - outStartY) + inStartY;
+            PF_Pixel8* inRow = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
+            if (copyW > 0) {
+                memcpy(outRow + outStartX, inRow + inStartX, (size_t)copyW * pxSize);
+            }
+        }
+    }
+
+    if (strokeThicknessF <= 0.0f) {
         return err;
     }
 
-    // Build SDF on the expanded output grid so we can evaluate Outside bounds.
-    const A_long originX = in_data->output_origin_x;
-    const A_long originY = in_data->output_origin_y;
-    const A_long gridW = output->width;
-    const A_long gridH = output->height;
+    const float AA_RANGE = 1.0f;
+    const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
-    // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
-    A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
-    A_u_short thresholdSdf16 = thresholdSdf8 * 257;
+    // Compute a tight ROI for the SDF / stroke evaluation.
+    BorderRectI solidIn;
+    if (!BorderGetSolidBounds(input, thresholdSdf8, thresholdSdf16, solidIn)) {
+        // Fully transparent input => nothing to stroke.
+        return err;
+    }
 
-    auto isSolidGrid = [&](A_long gx, A_long gy) -> bool {
-        A_long ix = gx - originX;
-        A_long iy = gy - originY;
-        if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) {
-            return false;
-        }
+    const A_long pad = (A_long)ceilf(MAX_EVAL_DIST + 3.0f);
+    const A_long solidOutL = solidIn.left + originX;
+    const A_long solidOutT = solidIn.top + originY;
+    const A_long solidOutR = solidIn.right + originX;
+    const A_long solidOutB = solidIn.bottom + originY;
+
+    const A_long roiLeft = CLAMP(solidOutL - pad, (A_long)0, outW - 1);
+    const A_long roiTop = CLAMP(solidOutT - pad, (A_long)0, outH - 1);
+    const A_long roiRight = CLAMP(solidOutR + pad, (A_long)0, outW - 1);
+    const A_long roiBottom = CLAMP(solidOutB + pad, (A_long)0, outH - 1);
+
+    const A_long roiW = roiRight - roiLeft + 1;
+    const A_long roiH = roiBottom - roiTop + 1;
+    (void)roiH;
+
+    auto isSolidRoi = [&](A_long lx, A_long ly) -> bool {
+        const A_long gx = roiLeft + lx;
+        const A_long gy = roiTop + ly;
+        const A_long ix = gx - originX;
+        const A_long iy = gy - originY;
+        if (ix < 0 || ix >= inW || iy < 0 || iy >= inH) return false;
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes) + ix;
             return p->alpha > thresholdSdf16;
@@ -1031,72 +1124,24 @@ Render(
     };
 
     std::vector<int> signedDist;
-    ComputeSignedDistanceFieldFromSolid(gridW, gridH, isSolidGrid, signedDist);
-
-    // Clear output to transparent.
-    if (PF_WORLD_IS_DEEP(output)) {
-        for (A_long y = 0; y < output->height; ++y) {
-            PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-            for (A_long x = 0; x < output->width; ++x) {
-                outData[x].alpha = 0;
-                outData[x].red = outData[x].green = outData[x].blue = 0;
-            }
-        }
-    } else {
-        for (A_long y = 0; y < output->height; ++y) {
-            PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-            for (A_long x = 0; x < output->width; ++x) {
-                outData[x].alpha = 0;
-                outData[x].red = outData[x].green = outData[x].blue = 0;
-            }
-        }
-    }
-
-    // Copy source into expanded output if not line-only.
-    if (!showLineOnly) {
-        if (PF_WORLD_IS_DEEP(output)) {
-            for (A_long oy = 0; oy < output->height; ++oy) {
-                A_long iy = oy - originY;
-                if (iy < 0 || iy >= input->height) continue;
-                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
-                PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
-                for (A_long ox = 0; ox < output->width; ++ox) {
-                    A_long ix = ox - originX;
-                    if (ix < 0 || ix >= input->width) continue;
-                    outData[ox] = inData[ix];
-                }
-            }
-        } else {
-            for (A_long oy = 0; oy < output->height; ++oy) {
-                A_long iy = oy - originY;
-                if (iy < 0 || iy >= input->height) continue;
-                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
-                PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
-                for (A_long ox = 0; ox < output->width; ++ox) {
-                    A_long ix = ox - originX;
-                    if (ix < 0 || ix >= input->width) continue;
-                    outData[ox] = inData[ix];
-                }
-            }
-        }
-    }
-
-    const float AA_RANGE = 1.0f;
+    ComputeSignedDistanceFieldFromSolid(roiW, roiH, isSolidRoi, signedDist);
 
     auto sampleSDF = [&](float fx, float fy) -> float {
-        fx = CLAMP(fx, 0.0f, gridW - 1.001f);
-        fy = CLAMP(fy, 0.0f, gridH - 1.001f);
-        int x0 = (int)fx;
-        int y0 = (int)fy;
-        int x1 = MIN(x0 + 1, (int)gridW - 1);
-        int y1 = MIN(y0 + 1, (int)gridH - 1);
-        float tx = fx - x0;
-        float ty = fy - y0;
+        fx = CLAMP(fx, (float)roiLeft, (float)roiRight - 0.001f);
+        fy = CLAMP(fy, (float)roiTop, (float)roiBottom - 0.001f);
+        float lx = fx - (float)roiLeft;
+        float ly = fy - (float)roiTop;
+        int x0 = (int)lx;
+        int y0 = (int)ly;
+        int x1 = MIN(x0 + 1, (int)roiW - 1);
+        int y1 = MIN(y0 + 1, (int)roiH - 1);
+        float tx = lx - x0;
+        float ty = ly - y0;
 
-        int d00 = signedDist[(size_t)y0 * (size_t)gridW + (size_t)x0];
-        int d10 = signedDist[(size_t)y0 * (size_t)gridW + (size_t)x1];
-        int d01 = signedDist[(size_t)y1 * (size_t)gridW + (size_t)x0];
-        int d11 = signedDist[(size_t)y1 * (size_t)gridW + (size_t)x1];
+        int d00 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x0];
+        int d10 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x1];
+        int d01 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x0];
+        int d11 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x1];
 
         float d0 = d00 + (d10 - d00) * tx;
         float d1 = d01 + (d11 - d01) * tx;
@@ -1114,15 +1159,15 @@ Render(
     };
 
     auto sdfCenterAdjusted = [&](A_long gx, A_long gy) -> float {
-        gx = CLAMP(gx, (A_long)0, gridW - 1);
-        gy = CLAMP(gy, (A_long)0, gridH - 1);
-        float sdf = signedDist[(size_t)gy * (size_t)gridW + (size_t)gx] * 0.1f;
+        gx = CLAMP(gx, roiLeft, roiRight);
+        gy = CLAMP(gy, roiTop, roiBottom);
+        const A_long lx = gx - roiLeft;
+        const A_long ly = gy - roiTop;
+        float sdf = signedDist[(size_t)ly * (size_t)roiW + (size_t)lx] * 0.1f;
         if (sdf > 0.0f) sdf -= 0.5f;
         else if (sdf < 0.0f) sdf += 0.5f;
         return sdf;
     };
-
-    const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     auto strokeSampleCoverage = [&](float sdf) -> float {
         float sideMask = 1.0f;
@@ -1148,9 +1193,9 @@ Render(
         edge_color.green = PF_BYTE_TO_CHAR(color.green);
         edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-        for (A_long oy = 0; oy < output->height; ++oy) {
+        for (A_long oy = roiTop; oy <= roiBottom; ++oy) {
             PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
-            for (A_long ox = 0; ox < output->width; ++ox) {
+            for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 PF_Pixel16 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
@@ -1217,9 +1262,9 @@ Render(
             }
         }
     } else {
-        for (A_long oy = 0; oy < output->height; ++oy) {
+        for (A_long oy = roiTop; oy <= roiBottom; ++oy) {
             PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
-            for (A_long ox = 0; ox < output->width; ++ox) {
+            for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 PF_Pixel8 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
