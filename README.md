@@ -25,3 +25,7 @@ AeSDK 付属の Examples ツリー内でビルドできるようにしてあり�
 - Shape/Text はレイヤー境界がタイトになりがちで、Smart Render だと境界外ピクセルがクロップされるケースがありました。
 - 本プロジェクトでは **Smart Render を使わず**、`PF_Cmd_FRAME_SETUP` で `out_data->width/height/origin` を設定して出力バッファを拡張します（MultiSlicer方式）。
 - `PF_OutFlag_I_EXPAND_BUFFER` と `PF_OutFlag2_REVEALS_ZERO_ALPHA` を有効化しています。
+
+## Multi-Frame Rendering（MFR）
+- `PF_OutFlag2_SUPPORTS_THREADED_RENDERING` を有効化しており、MFR 対応です。
+- もし AE 上で「MFR に最適化されていない」警告が出る場合、古い PiPL フラグがキャッシュされていることがあります。AE を再起動し、古い `.aex` を置き換えた状態で再度確認してください。

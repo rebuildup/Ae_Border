@@ -56,18 +56,14 @@ GlobalSetup(
     // Use the same packed constant as the PiPL to avoid version mismatch warnings.
     out_data->my_version = BORDER_VERSION_VALUE;
 
-    // I_EXPAND_BUFFER is required to allow drawing beyond the layer bounds
-    // (e.g. Shape/Text layers with tight bounds).
-    out_data->out_flags = PF_OutFlag_DEEP_COLOR_AWARE |
-                          PF_OutFlag_PIX_INDEPENDENT |
-                          PF_OutFlag_USE_OUTPUT_EXTENT |
-                          PF_OutFlag_I_EXPAND_BUFFER;
-    // REVEALS_ZERO_ALPHA is important for Shape/Text layers: AE may otherwise crop
-    // the renderable rect to non-zero alpha, which prevents drawing Outside bounds.
-    // We intentionally do NOT advertise Smart Render, because in practice it can clamp
-    // Shape/Text output to the layer bounds even when returning extra pixels.
-    out_data->out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
-                           PF_OutFlag2_REVEALS_ZERO_ALPHA;
+    // Keep these numeric flags in sync with BorderPiPL.r (PiPLTool requires literals).
+    // out_flags  = PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT |
+    //              PF_OutFlag_USE_OUTPUT_EXTENT | PF_OutFlag_I_EXPAND_BUFFER
+    // out_flags2 = PF_OutFlag2_SUPPORTS_THREADED_RENDERING | PF_OutFlag2_REVEALS_ZERO_ALPHA
+    static constexpr A_long kOutFlags  = 0x02000640;
+    static constexpr A_long kOutFlags2 = 0x08000080;
+    out_data->out_flags  = kOutFlags;
+    out_data->out_flags2 = kOutFlags2;
 
     return PF_Err_NONE;
 }
@@ -203,9 +199,12 @@ FrameSetup(
     float strokeThicknessPx = 0.0f;
     A_long expansionPx = 0;
     BorderComputePixelThickness(in_data, thickness, direction, strokeThicknessPx, expansionPx);
+    (void)strokeThicknessPx;
 
-    const A_long srcW = params[BORDER_INPUT]->u.ld.width;
-    const A_long srcH = params[BORDER_INPUT]->u.ld.height;
+    // IMPORTANT: In PF_Cmd_FRAME_SETUP, the input layer param is not valid per the SDK docs.
+    // Use in_data->width/height as the base buffer size for expansion.
+    const A_long srcW = in_data->width;
+    const A_long srcH = in_data->height;
 
     if (expansionPx > 0) {
         out_data->width = srcW + expansionPx * 2;
@@ -489,50 +488,6 @@ PreRender(
     PF_CheckoutResult in_result;
     AEFX_CLR_STRUCT(in_result);
 
-    PF_ParamDef thickness_param;
-    AEFX_CLR_STRUCT(thickness_param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_THICKNESS, in_data->current_time, in_data->time_step, in_data->time_scale, &thickness_param));
-
-    PF_ParamDef direction_param;
-    AEFX_CLR_STRUCT(direction_param);
-    ERR(PF_CHECKOUT_PARAM(in_data, BORDER_DIRECTION, in_data->current_time, in_data->time_step, in_data->time_scale, &direction_param));
-
-    PF_FpLong thickness = thickness_param.u.fs_d.value;
-    A_long direction = direction_param.u.pd.value;
-
-    float pixelThickness;
-    if (thickness <= 0.0f) {
-        pixelThickness = 0.0f;
-    }
-    else if (thickness <= 10.0f) {
-        pixelThickness = static_cast<float>(thickness);
-    }
-    else {
-        float normalizedThickness = static_cast<float>((thickness - 10.0f) / 90.0f);
-        pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
-    }
-
-    float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
-    float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
-    float resolution_factor = MIN(downsize_x, downsize_y);
-
-    // Compute how many pixels we may need *outside* the layer bounds.
-    // Avoid arbitrary padding: expand by the outside stroke thickness + AA/support.
-    const float AA_RANGE_PX = 1.0f;
-    const float SAMPLE_GUARD_PX = 1.0f; // covers bilinear + 2x2 sample offsets safely
-
-    float outsideThicknessPx = 0.0f;
-    if (direction == DIRECTION_OUTSIDE) {
-        outsideThicknessPx = pixelThickness;
-    } else if (direction == DIRECTION_BOTH) {
-        outsideThicknessPx = pixelThickness * 0.5f;
-    }
-
-    A_long borderExpansion = 0;
-    if (outsideThicknessPx > 0.0f) {
-        borderExpansion = (A_long)ceil((outsideThicknessPx / resolution_factor) + AA_RANGE_PX + SAMPLE_GUARD_PX);
-    }
-
     // 1) Bounds checkout with empty request_rect: lets AE compute input max_result_rect
     // without requiring us to render pixels. This is the recommended way to get stable
     // layer bounds in SmartFX.
@@ -545,78 +500,16 @@ PreRender(
             in_data->current_time, in_data->time_step, in_data->time_scale, &bounds_result));
     }
 
-    // 2) Pixel checkout: request the output area expanded by the stroke so we can compute SDF
-    // and draw in the expanded region (outside the original layer bounds when allowed).
-    PF_RenderRequest pixReq = req;
-    if (borderExpansion > 0) {
-        // Extra guard for bilinear + 2x2 sampling near the edge.
-        const A_long inputGuard = 2;
-        const A_long inputExpansion = borderExpansion + inputGuard;
-        pixReq.rect.left   -= inputExpansion;
-        pixReq.rect.top    -= inputExpansion;
-        pixReq.rect.right  += inputExpansion;
-        pixReq.rect.bottom += inputExpansion;
-    }
-
-    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, kCheckoutIdInput, &pixReq,
+    // 2) Pixel checkout for the requested rect.
+    ERR(extra->cb->checkout_layer(in_data->effect_ref, BORDER_INPUT, kCheckoutIdInput, &req,
         in_data->current_time, in_data->time_step, in_data->time_scale, &in_result));
 
     // Store the checkout_id we provided to checkout_layer() for pixels.
     extra->output->pre_render_data = (void*)(intptr_t)kCheckoutIdInput;
 
-    PF_LRect request_rect = extra->input->output_request.rect;
-
-    // For Shape/Text layers the layer bounds can be tight; when drawing Outside/Both we need
-    // pixels beyond the requested rect. SmartFX supports this via RETURNS_EXTRA_PIXELS.
-    // If we don't set it, AE may clip the stroke to the layer bounds regardless of "Grow Bounds".
-    PF_LRect result_rect = request_rect;
-
-    // max_result_rect must be stable (not depend on requested size).
-    // For Shape/Text layers, max_result_rect from checkout can be tightly cropped,
-    // but ref_width/ref_height represent the full layer raster dimensions.
-    //
-    // IMPORTANT: rect coordinates may not be (0,0)-based; preserve the returned origin.
-    PF_LRect max_rect = bounds_result.max_result_rect;
-    if (bounds_result.ref_width > 0 && bounds_result.ref_height > 0) {
-        max_rect.right = max_rect.left + bounds_result.ref_width;
-        max_rect.bottom = max_rect.top + bounds_result.ref_height;
-    }
-
-    auto expand_rect = [](PF_LRect& r, A_long e) {
-        r.left   -= e;
-        r.top    -= e;
-        r.right  += e;
-        r.bottom += e;
-    };
-
-    auto intersect_rect = [](const PF_LRect& a, const PF_LRect& b) -> PF_LRect {
-        PF_LRect o;
-        o.left   = MAX(a.left,   b.left);
-        o.top    = MAX(a.top,    b.top);
-        o.right  = MIN(a.right,  b.right);
-        o.bottom = MIN(a.bottom, b.bottom);
-        if (o.right < o.left)   o.right = o.left;
-        if (o.bottom < o.top)   o.bottom = o.top;
-        return o;
-    };
-
-    if (direction != DIRECTION_INSIDE && borderExpansion > 0) {
-        extra->output->flags |= PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS;
-
-        expand_rect(result_rect, borderExpansion);
-
-        // Expand max_result_rect by the possible output growth from the stroke.
-        expand_rect(max_rect, borderExpansion);
-
-        // Keep result_rect within max_rect.
-        result_rect = intersect_rect(result_rect, max_rect);
-    }
-
-    extra->output->result_rect     = result_rect;
-    extra->output->max_result_rect = max_rect;
-
-    PF_CHECKIN_PARAM(in_data, &thickness_param);
-    PF_CHECKIN_PARAM(in_data, &direction_param);
+    // Do not claim extra pixels via SmartFX (avoids (25::237) result/max rect errors).
+    extra->output->result_rect     = extra->input->output_request.rect;
+    extra->output->max_result_rect = bounds_result.max_result_rect;
 
     return err;
 }
@@ -627,7 +520,6 @@ SmartRender(
     PF_SmartRenderExtra* extra)
 {
     PF_Err err = PF_Err_NONE;
-    AEGP_SuiteHandler suites(in_data->pica_basicP);
 
     A_long checkout_id = (A_long)(intptr_t)extra->input->pre_render_data;
 
@@ -1423,6 +1315,17 @@ EffectMain(
 
         case PF_Cmd_RENDER:
             err = Render(in_data, out_data, params, output);
+            break;
+
+        // Fallback SmartFX handlers:
+        // We do not advertise Smart Render in out_flags2, but hosts may still call these
+        // if they have cached older PiPL flags. Implementing them avoids hard errors.
+        case PF_Cmd_SMART_PRE_RENDER:
+            err = PreRender(in_data, out_data, reinterpret_cast<PF_PreRenderExtra*>(extra));
+            break;
+
+        case PF_Cmd_SMART_RENDER:
+            err = SmartRender(in_data, out_data, reinterpret_cast<PF_SmartRenderExtra*>(extra));
             break;
         }
     }

@@ -51,7 +51,7 @@ resource 'PiPL' (16000) {
         // NOTE: PiPLTool requires a numeric literal here (no macros/expressions).
         // These literals equal:
         // PF_OutFlag2_SUPPORTS_THREADED_RENDERING | PF_OutFlag2_REVEALS_ZERO_ALPHA
-        AE_Effect_Global_OutFlags_2 { 0x00000480 },
+        AE_Effect_Global_OutFlags_2 { 0x08000080 },
         /* [11] */
         AE_Effect_Match_Name {
             "361do Border"
