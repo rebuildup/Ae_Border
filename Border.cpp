@@ -124,7 +124,11 @@ BorderGetInternalThreadCount(A_long work_items)
 
     static int cached = -1;
     if (cached < 0) {
-        int threads = 0;
+        // Default to single-threaded internally.
+        // After Effects already provides Multi-Frame Rendering (MFR) parallelism; additionally
+        // spawning our own threads can oversubscribe CPU and even destabilize some hosts.
+        // Enable internal parallelism only when explicitly requested via BORDER_THREADS.
+        int threads = 1;
         char* env_buf = nullptr;
 #ifdef _WIN32
         size_t len = 0;
@@ -144,10 +148,9 @@ BorderGetInternalThreadCount(A_long work_items)
 #endif
         if (env_buf) free(env_buf);
 
-        if (threads <= 0) {
-            unsigned hc = std::thread::hardware_concurrency();
-            threads = (hc > 0) ? (int)hc : 1;
-        }
+        // If explicitly set to 0 or negative, treat as "off".
+        if (threads <= 0) threads = 1;
+
         // Conservative cap to reduce oversubscription under AE Multi-Frame Rendering.
         if (threads > 8) threads = 8;
         if (threads < 1) threads = 1;
