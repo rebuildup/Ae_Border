@@ -6,6 +6,7 @@
 #include <cstring>
 #include <thread>
 #include <cstdlib>
+#include <cerrno>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -34,6 +35,14 @@ struct EdgePoint {
 struct BorderRectI {
     A_long left, top, right, bottom; // inclusive
 };
+
+static int BorderGetInternalThreadCount(A_long work_items);
+
+template <typename Fn>
+static void BorderParallelFor(A_long count, Fn fn);
+
+template <typename Fn>
+static void BorderParallelForRange(A_long count, Fn fn);
 
 static bool
 BorderGetSolidBounds(
@@ -116,9 +125,25 @@ BorderGetInternalThreadCount(A_long work_items)
     static int cached = -1;
     if (cached < 0) {
         int threads = 0;
-        if (const char* env = std::getenv("BORDER_THREADS")) {
-            threads = atoi(env);
+        char* env_buf = nullptr;
+#ifdef _WIN32
+        size_t len = 0;
+        if (_dupenv_s(&env_buf, &len, "BORDER_THREADS") == 0 && env_buf) {
+            char* endp = nullptr;
+            errno = 0;
+            long v = strtol(env_buf, &endp, 10);
+            if (errno == 0 && endp != env_buf) threads = (int)v;
         }
+#else
+        if (const char* env = std::getenv("BORDER_THREADS")) {
+            char* endp = nullptr;
+            errno = 0;
+            long v = strtol(env, &endp, 10);
+            if (errno == 0 && endp != env) threads = (int)v;
+        }
+#endif
+        if (env_buf) free(env_buf);
+
         if (threads <= 0) {
             unsigned hc = std::thread::hardware_concurrency();
             threads = (hc > 0) ? (int)hc : 1;
