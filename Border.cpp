@@ -240,7 +240,7 @@ ComputeSignedDistanceField(
     const A_long w = width;
     const A_long h = height;
 
-    signedDist.assign(w * h, 0);
+    signedDist.clear();
 
     auto isSolid = [&](A_long x, A_long y)->bool {
         if (PF_WORLD_IS_DEEP(input)) {
@@ -306,9 +306,9 @@ ComputeSignedDistanceField(
         if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
 
         // Pass 1: rows
+        lineIn.resize((size_t)w);
+        lineOut.resize((size_t)w);
         for (A_long y = 0; y < h; ++y) {
-            lineIn.resize((size_t)w);
-            lineOut.resize((size_t)w);
             for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
 
             edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
@@ -316,9 +316,9 @@ ComputeSignedDistanceField(
         }
 
         // Pass 2: columns
+        lineIn.resize((size_t)h);
+        lineOut.resize((size_t)h);
         for (A_long x = 0; x < w; ++x) {
-            lineIn.resize((size_t)h);
-            lineOut.resize((size_t)h);
             for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
 
             edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
@@ -327,20 +327,19 @@ ComputeSignedDistanceField(
         }
     };
 
-    // Build 0/INF grids for foreground/background feature points.
-    // dtFg: distance to nearest solid pixel center
-    // dtBg: distance to nearest transparent pixel center
+    // Build 0/INF grids for foreground/background feature points and cache solidity.
+    // dtFg2: squared distance to nearest solid pixel center
+    // dtBg2: squared distance to nearest transparent pixel center
+    std::vector<A_u_char> solidMask(w * h, 0);
     std::vector<int> fFg(w * h, INF);
     std::vector<int> fBg(w * h, INF);
     for (A_long y = 0; y < h; ++y) {
         for (A_long x = 0; x < w; ++x) {
-            bool solid = isSolid(x, y);
-            size_t i = (size_t)y * (size_t)w + (size_t)x;
-            if (solid) {
-                fFg[i] = 0;
-            } else {
-                fBg[i] = 0;
-            }
+            const bool solid = isSolid(x, y);
+            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            solidMask[i] = solid ? 1 : 0;
+            if (solid) fFg[i] = 0;
+            else fBg[i] = 0;
         }
     }
 
@@ -348,15 +347,16 @@ ComputeSignedDistanceField(
     edt2d(fFg, dtFg2);
     edt2d(fBg, dtBg2);
 
-    // Signed distance (pixels), scaled by 10.
-    // sdf = distToBg - distToFg  => positive inside, negative outside.
+    // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
+    // NOTE: The 0.5px center correction is applied later in the sampler.
     for (A_long y = 0; y < h; ++y) {
         for (A_long x = 0; x < w; ++x) {
             size_t i = (size_t)y * (size_t)w + (size_t)x;
-            float distToFg = sqrtf((float)dtFg2[i]);
-            float distToBg = sqrtf((float)dtBg2[i]);
-            float sdf = distToBg - distToFg;
-            signedDist[i] = (int)floorf(sdf * 10.0f + (sdf >= 0.0f ? 0.5f : -0.5f));
+            const bool solid = (solidMask[i] != 0);
+            const int d2 = solid ? dtBg2[i] : dtFg2[i];
+            const float dist = sqrtf((float)d2);
+            const int sd = (int)floorf(dist * 10.0f + 0.5f);
+            signedDist[i] = solid ? sd : -sd;
         }
     }
 
@@ -426,18 +426,18 @@ ComputeSignedDistanceFieldFromSolid(
 
         if (tmp.size() != (size_t)w * (size_t)h) tmp.assign((size_t)w * (size_t)h, INF);
 
+        lineIn.resize((size_t)w);
+        lineOut.resize((size_t)w);
         for (A_long y = 0; y < h; ++y) {
-            lineIn.resize((size_t)w);
-            lineOut.resize((size_t)w);
             for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
 
             edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
             for (A_long x = 0; x < w; ++x) tmp[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
         }
 
+        lineIn.resize((size_t)h);
+        lineOut.resize((size_t)h);
         for (A_long x = 0; x < w; ++x) {
-            lineIn.resize((size_t)h);
-            lineOut.resize((size_t)h);
             for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
 
             edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
@@ -445,29 +445,43 @@ ComputeSignedDistanceFieldFromSolid(
         }
     };
 
-    std::vector<int> fFg(w * h, INF);
-    std::vector<int> fBg(w * h, INF);
+    // Reuse large buffers across frames to reduce heap churn (thread-safe under MFR).
+    thread_local std::vector<A_u_char> solidMask;
+    thread_local std::vector<int> fFg;
+    thread_local std::vector<int> fBg;
+    thread_local std::vector<int> dtFg2;
+    thread_local std::vector<int> dtBg2;
+
+    const size_t n = (size_t)w * (size_t)h;
+    if (solidMask.size() != n) solidMask.assign(n, 0);
+    if (fFg.size() != n) fFg.assign(n, INF);
+    else std::fill(fFg.begin(), fFg.end(), INF);
+    if (fBg.size() != n) fBg.assign(n, INF);
+    else std::fill(fBg.begin(), fBg.end(), INF);
+
+    // Build 0/INF grids for foreground/background feature points and cache solidity.
     for (A_long y = 0; y < h; ++y) {
         for (A_long x = 0; x < w; ++x) {
-            bool solid = isSolid(x, y);
-            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const bool solid = isSolid(x, y);
+            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            solidMask[i] = solid ? 1 : 0;
             if (solid) fFg[i] = 0;
             else fBg[i] = 0;
         }
     }
 
-    std::vector<int> dtFg2, dtBg2;
     edt2d(fFg, dtFg2);
     edt2d(fBg, dtBg2);
 
-    for (A_long y = 0; y < h; ++y) {
-        for (A_long x = 0; x < w; ++x) {
-            size_t i = (size_t)y * (size_t)w + (size_t)x;
-            float distToFg = sqrtf((float)dtFg2[i]);
-            float distToBg = sqrtf((float)dtBg2[i]);
-            float sdf = distToBg - distToFg;
-            signedDist[i] = (int)floorf(sdf * 10.0f + (sdf >= 0.0f ? 0.5f : -0.5f));
-        }
+    // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
+    // NOTE: The 0.5px center correction is applied later in the sampler.
+    signedDist.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        const bool solid = (solidMask[i] != 0);
+        const int d2 = solid ? dtBg2[i] : dtFg2[i];
+        const float dist = sqrtf((float)d2);
+        const int sd = (int)floorf(dist * 10.0f + 0.5f);
+        signedDist[i] = solid ? sd : -sd;
     }
 }
 
@@ -751,35 +765,38 @@ SmartRender(
                     PF_Pixel16 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
-                    // Fast reject: most pixels are far from the boundary, avoid 2x2 bilinear sampling.
-                    {
-                        float sdfC = sdfCenterAdjusted(ix, iy);
-                        float distC;
-                        if (direction == DIRECTION_INSIDE) {
-                            if (sdfC < -MAX_EVAL_DIST) continue;
-                            distC = (sdfC > 0.0f) ? sdfC : 0.0f;
-                        } else if (direction == DIRECTION_OUTSIDE) {
-                            if (sdfC > MAX_EVAL_DIST) continue;
-                            distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
-                        } else {
-                            distC = fabsf(sdfC);
-                        }
-                        if (distC > MAX_EVAL_DIST) continue;
+                    // Adaptive supersample:
+                    // Use center coverage for the vast majority of pixels and only do 2x2
+                    // bilinear sampling near the anti-aliased stroke edge.
+                    float sdfC = sdfCenterAdjusted(ix, iy);
+                    float distC;
+                    if (direction == DIRECTION_INSIDE) {
+                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                    } else {
+                        distC = fabsf(sdfC);
                     }
+                    if (distC > MAX_EVAL_DIST) continue;
 
-                    // 2x2 supersample
-                    float strokeCoverage = 0.0f;
-                    for (int s = 0; s < 4; ++s) {
-                        // Sample in input pixel space (x/y are input indices).
-                        float fx = (float)ix + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)iy + 0.5f + sampleOffsets[s][1];
-                        float sdf = sampleSDF(fx, fy); // + inside, - outside
-                        strokeCoverage += strokeSampleCoverage(sdf);
-                    }
-
-                    strokeCoverage *= 0.25f; // average 4 samples
-
+                    float strokeCoverage = strokeSampleCoverage(sdfC);
                     if (strokeCoverage < 0.001f) continue;
+
+                    bool needSupersample = (strokeCoverage < 0.999f);
+                    if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
+                        needSupersample = true;
+                    }
+                    if (needSupersample) {
+                        strokeCoverage = 0.0f;
+                        for (int s = 0; s < 4; ++s) {
+                            float fx = (float)ix + 0.5f + sampleOffsets[s][0];
+                            float fy = (float)iy + 0.5f + sampleOffsets[s][1];
+                            float sdf = sampleSDF(fx, fy); // + inside, - outside
+                            strokeCoverage += strokeSampleCoverage(sdf);
+                        }
+                        strokeCoverage *= 0.25f;
+                        if (strokeCoverage < 0.001f) continue;
+                    }
 
                     if (showLineOnly) {
                         // Line only: just draw the stroke (premultiplied)
@@ -828,34 +845,36 @@ SmartRender(
                     PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
-                    // Fast reject: most pixels are far from the boundary, avoid 2x2 bilinear sampling.
-                    {
-                        float sdfC = sdfCenterAdjusted(ix, iy);
-                        float distC;
-                        if (direction == DIRECTION_INSIDE) {
-                            if (sdfC < -MAX_EVAL_DIST) continue;
-                            distC = (sdfC > 0.0f) ? sdfC : 0.0f;
-                        } else if (direction == DIRECTION_OUTSIDE) {
-                            if (sdfC > MAX_EVAL_DIST) continue;
-                            distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
-                        } else {
-                            distC = fabsf(sdfC);
-                        }
-                        if (distC > MAX_EVAL_DIST) continue;
+                    // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                    float sdfC = sdfCenterAdjusted(ix, iy);
+                    float distC;
+                    if (direction == DIRECTION_INSIDE) {
+                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                    } else {
+                        distC = fabsf(sdfC);
                     }
+                    if (distC > MAX_EVAL_DIST) continue;
 
-                    float strokeCoverage = 0.0f;
-                    for (int s = 0; s < 4; ++s) {
-                        // Sample in input pixel space (x/y are input indices).
-                        float fx = (float)ix + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)iy + 0.5f + sampleOffsets[s][1];
-                        float sdf = sampleSDF(fx, fy);
-                        strokeCoverage += strokeSampleCoverage(sdf);
-                    }
-
-                    strokeCoverage *= 0.25f;
-
+                    float strokeCoverage = strokeSampleCoverage(sdfC);
                     if (strokeCoverage < 0.001f) continue;
+
+                    bool needSupersample = (strokeCoverage < 0.999f);
+                    if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
+                        needSupersample = true;
+                    }
+                    if (needSupersample) {
+                        strokeCoverage = 0.0f;
+                        for (int s = 0; s < 4; ++s) {
+                            float fx = (float)ix + 0.5f + sampleOffsets[s][0];
+                            float fy = (float)iy + 0.5f + sampleOffsets[s][1];
+                            float sdf = sampleSDF(fx, fy);
+                            strokeCoverage += strokeSampleCoverage(sdf);
+                        }
+                        strokeCoverage *= 0.25f;
+                        if (strokeCoverage < 0.001f) continue;
+                    }
                     
                     if (showLineOnly) {
                         // Line only: just draw the stroke (premultiplied)
@@ -1135,31 +1154,36 @@ Render(
                 PF_Pixel16 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
-                // Fast reject
-                {
-                    float sdfC = sdfCenterAdjusted(ox, oy);
-                    float distC;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < -MAX_EVAL_DIST) continue;
-                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > MAX_EVAL_DIST) continue;
-                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
-                    } else {
-                        distC = fabsf(sdfC);
-                    }
-                    if (distC > MAX_EVAL_DIST) continue;
+                // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                float sdfC = sdfCenterAdjusted(ox, oy);
+                float distC;
+                if (direction == DIRECTION_INSIDE) {
+                    distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                } else if (direction == DIRECTION_OUTSIDE) {
+                    distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                } else {
+                    distC = fabsf(sdfC);
                 }
+                if (distC > MAX_EVAL_DIST) continue;
 
-                float strokeCoverage = 0.0f;
-                for (int s = 0; s < 4; ++s) {
-                    float fx = (float)ox + 0.5f + sampleOffsets[s][0];
-                    float fy = (float)oy + 0.5f + sampleOffsets[s][1];
-                    float sdf = sampleSDF(fx, fy);
-                    strokeCoverage += strokeSampleCoverage(sdf);
-                }
-                strokeCoverage *= 0.25f;
+                float strokeCoverage = strokeSampleCoverage(sdfC);
                 if (strokeCoverage < 0.001f) continue;
+
+                bool needSupersample = (strokeCoverage < 0.999f);
+                if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
+                    needSupersample = true;
+                }
+                if (needSupersample) {
+                    strokeCoverage = 0.0f;
+                    for (int s = 0; s < 4; ++s) {
+                        float fx = (float)ox + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)oy + 0.5f + sampleOffsets[s][1];
+                        float sdf = sampleSDF(fx, fy);
+                        strokeCoverage += strokeSampleCoverage(sdf);
+                    }
+                    strokeCoverage *= 0.25f;
+                    if (strokeCoverage < 0.001f) continue;
+                }
 
                 if (showLineOnly) {
                     dst.red = (A_u_short)(edge_color.red * strokeCoverage);
@@ -1199,31 +1223,36 @@ Render(
                 PF_Pixel8 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
-                // Fast reject
-                {
-                    float sdfC = sdfCenterAdjusted(ox, oy);
-                    float distC;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < -MAX_EVAL_DIST) continue;
-                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > MAX_EVAL_DIST) continue;
-                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
-                    } else {
-                        distC = fabsf(sdfC);
-                    }
-                    if (distC > MAX_EVAL_DIST) continue;
+                // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                float sdfC = sdfCenterAdjusted(ox, oy);
+                float distC;
+                if (direction == DIRECTION_INSIDE) {
+                    distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                } else if (direction == DIRECTION_OUTSIDE) {
+                    distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                } else {
+                    distC = fabsf(sdfC);
                 }
+                if (distC > MAX_EVAL_DIST) continue;
 
-                float strokeCoverage = 0.0f;
-                for (int s = 0; s < 4; ++s) {
-                    float fx = (float)ox + 0.5f + sampleOffsets[s][0];
-                    float fy = (float)oy + 0.5f + sampleOffsets[s][1];
-                    float sdf = sampleSDF(fx, fy);
-                    strokeCoverage += strokeSampleCoverage(sdf);
-                }
-                strokeCoverage *= 0.25f;
+                float strokeCoverage = strokeSampleCoverage(sdfC);
                 if (strokeCoverage < 0.001f) continue;
+
+                bool needSupersample = (strokeCoverage < 0.999f);
+                if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
+                    needSupersample = true;
+                }
+                if (needSupersample) {
+                    strokeCoverage = 0.0f;
+                    for (int s = 0; s < 4; ++s) {
+                        float fx = (float)ox + 0.5f + sampleOffsets[s][0];
+                        float fy = (float)oy + 0.5f + sampleOffsets[s][1];
+                        float sdf = sampleSDF(fx, fy);
+                        strokeCoverage += strokeSampleCoverage(sdf);
+                    }
+                    strokeCoverage *= 0.25f;
+                    if (strokeCoverage < 0.001f) continue;
+                }
 
                 if (showLineOnly) {
                     dst.red = (A_u_char)(color.red * strokeCoverage);
