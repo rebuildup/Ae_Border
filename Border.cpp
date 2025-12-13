@@ -4,6 +4,8 @@
 #include <cfloat>
 #include <limits>
 #include <cstring>
+#include <thread>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -44,30 +46,58 @@ BorderGetSolidBounds(
     const A_long h = input->height;
     A_long minX = w, minY = h, maxX = -1, maxY = -1;
 
+    const int num_threads = BorderGetInternalThreadCount(h);
+    std::vector<A_long> tMinX((size_t)num_threads, w);
+    std::vector<A_long> tMinY((size_t)num_threads, h);
+    std::vector<A_long> tMaxX((size_t)num_threads, -1);
+    std::vector<A_long> tMaxY((size_t)num_threads, -1);
+
     if (PF_WORLD_IS_DEEP(input)) {
-        for (A_long y = 0; y < h; ++y) {
-            PF_Pixel16* row = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
-            for (A_long x = 0; x < w; ++x) {
-                if (row[x].alpha > threshold16) {
-                    if (x < minX) minX = x;
-                    if (y < minY) minY = y;
-                    if (x > maxX) maxX = x;
-                    if (y > maxY) maxY = y;
+        BorderParallelForRange(h, [&](A_long y0, A_long y1, int tid) {
+            A_long lminX = w, lminY = h, lmaxX = -1, lmaxY = -1;
+            for (A_long y = y0; y < y1; ++y) {
+                PF_Pixel16* row = (PF_Pixel16*)((char*)input->data + y * input->rowbytes);
+                for (A_long x = 0; x < w; ++x) {
+                    if (row[x].alpha > threshold16) {
+                        if (x < lminX) lminX = x;
+                        if (y < lminY) lminY = y;
+                        if (x > lmaxX) lmaxX = x;
+                        if (y > lmaxY) lmaxY = y;
+                    }
                 }
             }
-        }
+            tMinX[(size_t)tid] = lminX;
+            tMinY[(size_t)tid] = lminY;
+            tMaxX[(size_t)tid] = lmaxX;
+            tMaxY[(size_t)tid] = lmaxY;
+        });
     } else {
-        for (A_long y = 0; y < h; ++y) {
-            PF_Pixel8* row = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
-            for (A_long x = 0; x < w; ++x) {
-                if (row[x].alpha > threshold8) {
-                    if (x < minX) minX = x;
-                    if (y < minY) minY = y;
-                    if (x > maxX) maxX = x;
-                    if (y > maxY) maxY = y;
+        BorderParallelForRange(h, [&](A_long y0, A_long y1, int tid) {
+            A_long lminX = w, lminY = h, lmaxX = -1, lmaxY = -1;
+            for (A_long y = y0; y < y1; ++y) {
+                PF_Pixel8* row = (PF_Pixel8*)((char*)input->data + y * input->rowbytes);
+                for (A_long x = 0; x < w; ++x) {
+                    if (row[x].alpha > threshold8) {
+                        if (x < lminX) lminX = x;
+                        if (y < lminY) lminY = y;
+                        if (x > lmaxX) lmaxX = x;
+                        if (y > lmaxY) lmaxY = y;
+                    }
                 }
             }
-        }
+            tMinX[(size_t)tid] = lminX;
+            tMinY[(size_t)tid] = lminY;
+            tMaxX[(size_t)tid] = lmaxX;
+            tMaxY[(size_t)tid] = lmaxY;
+        });
+    }
+
+    for (int t = 0; t < num_threads; ++t) {
+        if (tMaxX[(size_t)t] < 0) continue;
+        if (tMinX[(size_t)t] < minX) minX = tMinX[(size_t)t];
+        if (tMinY[(size_t)t] < minY) minY = tMinY[(size_t)t];
+        if (tMaxX[(size_t)t] > maxX) maxX = tMaxX[(size_t)t];
+        if (tMaxY[(size_t)t] > maxY) maxY = tMaxY[(size_t)t];
     }
 
     if (maxX < minX || maxY < minY) return false;
@@ -76,6 +106,79 @@ BorderGetSolidBounds(
     outBounds.right = maxX;
     outBounds.bottom = maxY;
     return true;
+}
+
+static int
+BorderGetInternalThreadCount(A_long work_items)
+{
+    if (work_items <= 1) return 1;
+
+    static int cached = -1;
+    if (cached < 0) {
+        int threads = 0;
+        if (const char* env = std::getenv("BORDER_THREADS")) {
+            threads = atoi(env);
+        }
+        if (threads <= 0) {
+            unsigned hc = std::thread::hardware_concurrency();
+            threads = (hc > 0) ? (int)hc : 1;
+        }
+        // Conservative cap to reduce oversubscription under AE Multi-Frame Rendering.
+        if (threads > 8) threads = 8;
+        if (threads < 1) threads = 1;
+        cached = threads;
+    }
+
+    int t = cached;
+    if (t > (int)work_items) t = (int)work_items;
+    if (t < 1) t = 1;
+    return t;
+}
+
+template <typename Fn>
+static void
+BorderParallelFor(A_long count, Fn fn)
+{
+    const int num_threads = BorderGetInternalThreadCount(count);
+    if (num_threads <= 1) {
+        for (A_long i = 0; i < count; ++i) fn(i);
+        return;
+    }
+
+    const A_long chunk = (count + num_threads - 1) / num_threads;
+    std::vector<std::thread> threads;
+    threads.reserve((size_t)num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        const A_long start = (A_long)t * chunk;
+        const A_long end = MIN(start + chunk, count);
+        if (start >= end) break;
+        threads.emplace_back([=, &fn]() {
+            for (A_long i = start; i < end; ++i) fn(i);
+        });
+    }
+    for (auto& th : threads) th.join();
+}
+
+template <typename Fn>
+static void
+BorderParallelForRange(A_long count, Fn fn)
+{
+    const int num_threads = BorderGetInternalThreadCount(count);
+    if (num_threads <= 1) {
+        fn(0, count, 0);
+        return;
+    }
+
+    const A_long chunk = (count + num_threads - 1) / num_threads;
+    std::vector<std::thread> threads;
+    threads.reserve((size_t)num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        const A_long start = (A_long)t * chunk;
+        const A_long end = MIN(start + chunk, count);
+        if (start >= end) break;
+        threads.emplace_back([=, &fn]() { fn(start, end, t); });
+    }
+    for (auto& th : threads) th.join();
 }
 
 static PF_Err
@@ -343,10 +446,6 @@ ComputeSignedDistanceField(
 
     // 2D EDT: first along X (rows), then along Y (columns).
     // Scratch buffers reused across calls (thread-safe across AE's threaded rendering).
-    thread_local std::vector<int> vScratch;
-    thread_local std::vector<float> zScratch;
-    thread_local std::vector<int> lineIn;
-    thread_local std::vector<int> lineOut;
     thread_local std::vector<int> tmp;
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
@@ -357,42 +456,49 @@ ComputeSignedDistanceField(
         if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
 
         // Pass 1: rows
-        lineIn.resize((size_t)w);
-        lineOut.resize((size_t)w);
-        for (A_long y = 0; y < h; ++y) {
-            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
-
+        BorderParallelFor(h, [&](A_long y) {
+            thread_local std::vector<int> vScratch;
+            thread_local std::vector<float> zScratch;
+            thread_local std::vector<int> lineIn;
+            thread_local std::vector<int> lineOut;
+            lineIn.resize((size_t)w);
+            lineOut.resize((size_t)w);
+            const size_t row = (size_t)y * (size_t)w;
+            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[row + (size_t)x];
             edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
-            for (A_long x = 0; x < w; ++x) tmp[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
-        }
+            for (A_long x = 0; x < w; ++x) tmp[row + (size_t)x] = lineOut[(size_t)x];
+        });
 
         // Pass 2: columns
-        lineIn.resize((size_t)h);
-        lineOut.resize((size_t)h);
-        for (A_long x = 0; x < w; ++x) {
+        BorderParallelFor(w, [&](A_long x) {
+            thread_local std::vector<int> vScratch;
+            thread_local std::vector<float> zScratch;
+            thread_local std::vector<int> lineIn;
+            thread_local std::vector<int> lineOut;
+            lineIn.resize((size_t)h);
+            lineOut.resize((size_t)h);
             for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
-
             edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
-
             for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
-        }
+        });
     };
 
     // Build 0/INF grids for foreground/background feature points and cache solidity.
     // dtFg2: squared distance to nearest solid pixel center
     // dtBg2: squared distance to nearest transparent pixel center
-    std::vector<A_u_char> solidMask(w * h, 0);
-    std::vector<int> fFg(w * h, INF);
-    std::vector<int> fBg(w * h, INF);
-    for (A_long y = 0; y < h; ++y) {
+    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
+    std::vector<int> fFg((size_t)w * (size_t)h);
+    std::vector<int> fBg((size_t)w * (size_t)h);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
             const bool solid = isSolid(x, y);
-            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const size_t i = row + (size_t)x;
             solidMask[i] = solid ? 1 : 0;
-            if (solid) fFg[i] = 0;
-            else fBg[i] = 0;
+            fFg[i] = solid ? 0 : INF;
+            fBg[i] = solid ? INF : 0;
         }
-    }
+    });
 
     std::vector<int> dtFg2, dtBg2;
     edt2d(fFg, dtFg2);
@@ -400,16 +506,17 @@ ComputeSignedDistanceField(
 
     // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
     // NOTE: The 0.5px center correction is applied later in the sampler.
-    for (A_long y = 0; y < h; ++y) {
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
-            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const size_t i = row + (size_t)x;
             const bool solid = (solidMask[i] != 0);
             const int d2 = solid ? dtBg2[i] : dtFg2[i];
             const float dist = sqrtf((float)d2);
             const int sd = (int)floorf(dist * 10.0f + 0.5f);
             signedDist[i] = solid ? sd : -sd;
         }
-    }
+    });
 
     return PF_Err_NONE;
 }
@@ -465,11 +572,7 @@ ComputeSignedDistanceFieldFromSolid(
         }
     };
 
-    // Scratch buffers reused across calls (thread-safe across AE's threaded rendering).
-    thread_local std::vector<int> vScratch;
-    thread_local std::vector<float> zScratch;
-    thread_local std::vector<int> lineIn;
-    thread_local std::vector<int> lineOut;
+    // Scratch buffer reused across calls (thread-safe across AE's threaded rendering).
     thread_local std::vector<int> tmp;
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
@@ -479,23 +582,30 @@ ComputeSignedDistanceFieldFromSolid(
         // Row pass writes every element; no need to prefill.
         if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
 
-        lineIn.resize((size_t)w);
-        lineOut.resize((size_t)w);
-        for (A_long y = 0; y < h; ++y) {
-            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
-
+        BorderParallelFor(h, [&](A_long y) {
+            thread_local std::vector<int> vScratch;
+            thread_local std::vector<float> zScratch;
+            thread_local std::vector<int> lineIn;
+            thread_local std::vector<int> lineOut;
+            lineIn.resize((size_t)w);
+            lineOut.resize((size_t)w);
+            const size_t row = (size_t)y * (size_t)w;
+            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[row + (size_t)x];
             edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
-            for (A_long x = 0; x < w; ++x) tmp[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
-        }
+            for (A_long x = 0; x < w; ++x) tmp[row + (size_t)x] = lineOut[(size_t)x];
+        });
 
-        lineIn.resize((size_t)h);
-        lineOut.resize((size_t)h);
-        for (A_long x = 0; x < w; ++x) {
+        BorderParallelFor(w, [&](A_long x) {
+            thread_local std::vector<int> vScratch;
+            thread_local std::vector<float> zScratch;
+            thread_local std::vector<int> lineIn;
+            thread_local std::vector<int> lineOut;
+            lineIn.resize((size_t)h);
+            lineOut.resize((size_t)h);
             for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
-
             edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
             for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
-        }
+        });
     };
 
     // Reuse large buffers across frames to reduce heap churn (thread-safe under MFR).
@@ -507,21 +617,21 @@ ComputeSignedDistanceFieldFromSolid(
 
     const size_t n = (size_t)w * (size_t)h;
     if (solidMask.size() != n) solidMask.assign(n, 0);
-    if (fFg.size() != n) fFg.assign(n, INF);
-    else std::fill(fFg.begin(), fFg.end(), INF);
-    if (fBg.size() != n) fBg.assign(n, INF);
-    else std::fill(fBg.begin(), fBg.end(), INF);
+    if (fFg.size() != n) fFg.resize(n);
+    if (fBg.size() != n) fBg.resize(n);
 
     // Build 0/INF grids for foreground/background feature points and cache solidity.
-    for (A_long y = 0; y < h; ++y) {
+    // Write both arrays per pixel to avoid an O(N) fill pass.
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
             const bool solid = isSolid(x, y);
-            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const size_t i = row + (size_t)x;
             solidMask[i] = solid ? 1 : 0;
-            if (solid) fFg[i] = 0;
-            else fBg[i] = 0;
+            fFg[i] = solid ? 0 : INF;
+            fBg[i] = solid ? INF : 0;
         }
-    }
+    });
 
     edt2d(fFg, dtFg2);
     edt2d(fBg, dtBg2);
@@ -529,13 +639,14 @@ ComputeSignedDistanceFieldFromSolid(
     // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
     // NOTE: The 0.5px center correction is applied later in the sampler.
     signedDist.resize(n);
-    for (size_t i = 0; i < n; ++i) {
+    BorderParallelFor((A_long)n, [&](A_long ii) {
+        const size_t i = (size_t)ii;
         const bool solid = (solidMask[i] != 0);
         const int d2 = solid ? dtBg2[i] : dtFg2[i];
         const float dist = sqrtf((float)d2);
         const int sd = (int)floorf(dist * 10.0f + 0.5f);
         signedDist[i] = solid ? sd : -sd;
-    }
+    });
 }
 
 static PF_Err
@@ -1029,12 +1140,12 @@ Render(
     // with only the non-overlapping bands cleared.
     if (PF_WORLD_IS_DEEP(output)) {
         const size_t pxSize = sizeof(PF_Pixel16);
-        for (A_long oy = 0; oy < outH; ++oy) {
+        BorderParallelFor(outH, [&](A_long oy) {
             PF_Pixel16* outRow = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
             const bool overlapsY = (!showLineOnly && copyH > 0 && oy >= outStartY && oy < (outStartY + copyH));
             if (!overlapsY) {
                 memset(outRow, 0, (size_t)outW * pxSize);
-                continue;
+                return;
             }
 
             // Clear only the left/right bands (outside the copied source span).
@@ -1052,15 +1163,15 @@ Render(
             if (copyW > 0) {
                 memcpy(outRow + outStartX, inRow + inStartX, (size_t)copyW * pxSize);
             }
-        }
+        });
     } else {
         const size_t pxSize = sizeof(PF_Pixel8);
-        for (A_long oy = 0; oy < outH; ++oy) {
+        BorderParallelFor(outH, [&](A_long oy) {
             PF_Pixel8* outRow = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
             const bool overlapsY = (!showLineOnly && copyH > 0 && oy >= outStartY && oy < (outStartY + copyH));
             if (!overlapsY) {
                 memset(outRow, 0, (size_t)outW * pxSize);
-                continue;
+                return;
             }
 
             if (outStartX > 0) {
@@ -1076,7 +1187,7 @@ Render(
             if (copyW > 0) {
                 memcpy(outRow + outStartX, inRow + inStartX, (size_t)copyW * pxSize);
             }
-        }
+        });
     }
 
     if (strokeThicknessF <= 0.0f) {
@@ -1193,7 +1304,9 @@ Render(
         edge_color.green = PF_BYTE_TO_CHAR(color.green);
         edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-        for (A_long oy = roiTop; oy <= roiBottom; ++oy) {
+        const A_long roiH = roiBottom - roiTop + 1;
+        BorderParallelFor(roiH, [&](A_long ly) {
+            const A_long oy = roiTop + ly;
             PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
             for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 PF_Pixel16 dst = outData[ox];
@@ -1260,9 +1373,11 @@ Render(
 
                 outData[ox] = dst;
             }
-        }
+        });
     } else {
-        for (A_long oy = roiTop; oy <= roiBottom; ++oy) {
+        const A_long roiH = roiBottom - roiTop + 1;
+        BorderParallelFor(roiH, [&](A_long ly) {
+            const A_long oy = roiTop + ly;
             PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
             for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 PF_Pixel8 dst = outData[ox];
@@ -1329,7 +1444,7 @@ Render(
 
                 outData[ox] = dst;
             }
-        }
+        });
     }
 
     return err;

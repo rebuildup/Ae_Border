@@ -1,0 +1,112 @@
+name: バグ報告
+description: 再現可能なバグを報告するための詳細を作成します
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        バグ報告ありがとうございます。以下の項目を入力してください。
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      description: 使用しているOSを選択してください
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS 14 (Sonoma)
+        - macOS 13 (Ventura)
+        - macOS 12 (Monterey)
+        - その他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ae-version
+    attributes:
+      label: After Effects バージョン
+      description: 問題が発生したAfter Effectsのバージョンを選択してください
+      options:
+        - CC 2024 (24.x)
+        - CC 2023 (23.x)
+        - CC 2022 (22.x)
+        - CC 2021 (18.x)
+        - その他
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: プラグインバージョン
+      description: 使用しているプラグインのバージョンを入力してください (例: 1.0.0)
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: date
+    attributes:
+      label: 入手日 / 発生日
+      description: プラグインを入手した日付、またはバグが発生した日付
+      placeholder: "YYYY/MM/DD"
+
+  - type: dropdown
+    id: color-depth
+    attributes:
+      label: 色深度 (Color Depth)
+      description: プロジェクトの色深度設定
+      options:
+        - 8bpc
+        - 16bpc
+        - 32bpc
+    validations:
+      required: false
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU情報
+      description: 使用しているGPUのモデル名 (例: NVIDIA RTX 3080)
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: バグの説明
+      description: バグの内容を明確かつ簡潔に説明してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: |
+        バグを再現するための手順:
+        1. '...' に移動
+        2. '....' をクリック
+        3. '....' までスクロール
+        4. エラーを確認
+      placeholder: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-log
+    attributes:
+      label: エラーメッセージ / ログ
+      description: エラーメッセージが表示された場合は、その内容を正確に貼り付けてください
+      render: shell
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: スクリーンショット / プロジェクトファイル
+      description: 問題を説明するスクリーンショットや、再現用の最小限の .aep プロジェクトファイルをここにドラッグ＆ドロップしてください

@@ -1,0 +1,62 @@
+name: 機能追加要望
+description: このプロジェクトへの機能追加を提案します
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        機能追加の提案ありがとうございます。
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: カテゴリ
+      options:
+        - UI / 操作性
+        - レンダリング / 画作り
+        - パフォーマンス / 速度
+        - ワークフロー / 連携
+        - その他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 機能の内容
+      description: 機能の要望を明確かつ簡潔に説明してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: この機能が解決する課題
+      description: 機能に関連する課題があれば説明してください (例: ...の時に不便です)
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 具体的な解決策の提案
+      description: あなたが考えている解決策を記載してください
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: その他の代替案
+      description: 検討した代替案や、現在どのように回避しているか（標準エフェクトの組み合わせなど）があれば説明してください
+
+  - type: input
+    id: date
+    attributes:
+      label: 要望日
+      placeholder: "YYYY/MM/DD"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: その他 / 参考画像
+      description: 機能要望に関する参考画像（UIのイメージや、期待する処理結果の画像）があれば添付してください

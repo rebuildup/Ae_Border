@@ -1,0 +1,65 @@
+name: 質問
+description: プロジェクトに関する質問
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        質問用テンプレートです。
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 質問カテゴリ
+      options:
+        - インストール / セットアップ
+        - 基本的な使い方
+        - ビルド / 開発全般
+        - バグかどうかの確認
+        - その他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - macOS
+        - その他
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: プラグイン / SDK バージョン
+      description: 関連する場合、バージョンを入力してください
+
+  - type: input
+    id: date
+    attributes:
+      label: 記入日
+      placeholder: "YYYY/MM/DD"
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 質問内容
+      description: 質問したいことを明確かつ簡潔に説明してください
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: この質問に至った背景や、試したことなどを記載してください
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ / スクリーンショット
+      description: 参考になるスクリーンショットや、ログがあれば添付してください
