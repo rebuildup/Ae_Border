@@ -82,13 +82,13 @@ echo "  -i $SDK_ROOT/Resources"
 echo "  -i $AE_GENERAL_DIR"
 
 # Run Rez with verbose output
-REZ_CMD="xcrun Rez -useDF -d AE_OS_MAC -d __MACH__ -i \"$SDK_ROOT/Headers\" -i \"$SDK_ROOT/Headers/SP\" -i \"$SDK_ROOT/Resources\" -i \"$AE_GENERAL_DIR\" -o \"$PIPL_OUTPUT\" \"$PIPL_SOURCE\""
+REZ_CMD="xcrun Rez -useDF -d AE_OS_MAC -d __MACH__ -d A_INTERNAL_TEST_ONE=0 -i \"$SDK_ROOT/Headers\" -i \"$SDK_ROOT/Headers/SP\" -i \"$SDK_ROOT/Resources\" -i \"$AE_GENERAL_DIR\" -o \"$PIPL_OUTPUT\" \"$PIPL_SOURCE\""
 echo "Command: $REZ_CMD"
 
 set +e
 REZ_OUTPUT=$(xcrun Rez -useDF \
   -d AE_OS_MAC \
-  -d __MACH__ \
+  -d __MACH__ -d A_INTERNAL_TEST_ONE=0 \
   -i "$SDK_ROOT/Headers" \
   -i "$SDK_ROOT/Headers/SP" \
   -i "$SDK_ROOT/Resources" \
