@@ -10,7 +10,7 @@
 		7EF36FB716F29701002A3CB3 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7EF36FB616F29701002A3CB3 /* Cocoa.framework */; };
 		D0FE575F0993C4E900139A60 /* Border_Strings.cpp in Sources */ = {isa = PBXBuildFile; fileRef = D0FE575A0993C4E900139A60 /* Border_Strings.cpp */; };
 		D0FE57600993C4E900139A60 /* Border.cpp in Sources */ = {isa = PBXBuildFile; fileRef = D0FE575C0993C4E900139A60 /* Border.cpp */; };
-		D0FE57610993C4E900139A60 /* BorderPiPL.r in Rez */ = {isa = PBXBuildFile; fileRef = D0FE575E0993C4E900139A60 /* BorderPiPL.r */; };
+		D0FE57610993C4E900139A60 /* BorderPiPL.r in Resources */ = {isa = PBXBuildFile; fileRef = D0FE575E0993C4E900139A60 /* BorderPiPL.r */; };
 		D0FE579D0993C5E500139A60 /* AEGP_SuiteHandler.cpp in Sources */ = {isa = PBXBuildFile; fileRef = D0FE579A0993C5E500139A60 /* AEGP_SuiteHandler.cpp */; };
 		D0FE579E0993C5E500139A60 /* MissingSuiteError.cpp in Sources */ = {isa = PBXBuildFile; fileRef = D0FE579C0993C5E500139A60 /* MissingSuiteError.cpp */; };
 /* End PBXBuildFile section */
@@ -131,16 +131,6 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
-/* Begin PBXRezBuildPhase section */
-		C4E618EA095A3E040012CA3F /* Rez */ = {
-			isa = PBXRezBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				D0FE57610993C4E900139A60 /* BorderPiPL.r in Rez */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXRezBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		C4E618C9095A3CE80012CA3F /* Sources */ = {
