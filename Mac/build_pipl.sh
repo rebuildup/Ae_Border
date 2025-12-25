@@ -75,8 +75,10 @@ rm -f "$PIPL_OUTPUT"
 
 SYSROOT=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || xcrun --show-sdk-path 2>/dev/null || true)
 STDINC=""
+SYSTYPES=""
 if [ -n "$SYSROOT" ] && [ -d "$SYSROOT/usr/include" ]; then
   STDINC="$SYSROOT/usr/include"
+  SYSTYPES="$SYSROOT/usr/include/sys/_types"
 else
   echo "::warning::macOS SDK sysroot include path not found; Rez may not locate stdint.h" >&2
 fi
@@ -96,7 +98,7 @@ if [ -n "$STDINC" ]; then
 fi
 
 # Run Rez with verbose output
-REZ_CMD="xcrun Rez -useDF -d AE_OS_MAC -d __MACH__ -d __APPLE__=1 -d __LP64__=1 -d __GNUC__=1 -d __clang__=1 -d A_INTERNAL_TEST_ONE=0 -d TARGET_OS_MAC=1 -d TARGET_OS_IPHONE=0 -d TARGET_OS_IOS=0 -d TARGET_OS_SIMULATOR=0 -d TARGET_OS_WATCH=0 -d TARGET_OS_TV=0 -d TARGET_OS_MACCATALYST=0 -d TARGET_CPU_PPC=0 -d TARGET_CPU_PPC64=0 -d TARGET_CPU_X86=0 -d TARGET_CPU_X86_64=1 -d TARGET_CPU_ARM=0 -d TARGET_CPU_ARM64=0 ${SYSROOT:+-isysroot \"$SYSROOT\"} ${STDINC:+-i \"$STDINC\"} -i \"$SDK_ROOT/Headers\" -i \"$SDK_ROOT/Headers/SP\" -i \"$SDK_ROOT/Resources\" -i \"$AE_GENERAL_DIR\" -o \"$PIPL_OUTPUT\" \"$PIPL_SOURCE\""
+REZ_CMD="xcrun Rez -useDF -d AE_OS_MAC -d __MACH__ -d __APPLE__=1 -d __LP64__=1 -d __GNUC__=1 -d __clang__=1 -d A_INTERNAL_TEST_ONE=0 -d TARGET_OS_MAC=1 -d TARGET_OS_IPHONE=0 -d TARGET_OS_IOS=0 -d TARGET_OS_SIMULATOR=0 -d TARGET_OS_WATCH=0 -d TARGET_OS_TV=0 -d TARGET_OS_MACCATALYST=0 -d TARGET_CPU_PPC=0 -d TARGET_CPU_PPC64=0 -d TARGET_CPU_X86=0 -d TARGET_CPU_X86_64=1 -d TARGET_CPU_ARM=0 -d TARGET_CPU_ARM64=0 ${SYSROOT:+-isysroot \"$SYSROOT\"} ${STDINC:+-i \"$STDINC\"} ${SYSTYPES:+-i \"$SYSTYPES\"} -i \"$SDK_ROOT/Headers\" -i \"$SDK_ROOT/Headers/SP\" -i \"$SDK_ROOT/Resources\" -i \"$AE_GENERAL_DIR\" -o \"$PIPL_OUTPUT\" \"$PIPL_SOURCE\""
 echo "Command: $REZ_CMD"
 
 set +e
@@ -109,6 +111,7 @@ REZ_OUTPUT=$(xcrun Rez -useDF \
   -d TARGET_CPU_ARM=0 -d TARGET_CPU_ARM64=0 \
   ${SYSROOT:+-isysroot "$SYSROOT"} \
   ${STDINC:+-i "$STDINC"} \
+  ${SYSTYPES:+-i "$SYSTYPES"} \
   -i "$SDK_ROOT/Headers" \
   -i "$SDK_ROOT/Headers/SP" \
   -i "$SDK_ROOT/Resources" \
