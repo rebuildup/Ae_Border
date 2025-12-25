@@ -1,5 +1,4 @@
 #include "AEConfig.h"
-#include "AE_Effect.h"       // for PF_OutFlag macros
 #include "AE_EffectVers.h"   // for PF_PLUG_IN_VERSION/PF_PLUG_IN_SUBVERS
 #include "Border_Version.h"
 
