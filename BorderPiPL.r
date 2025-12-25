@@ -3,8 +3,14 @@
 #include "AE_EffectVers.h"   // for PF_PLUG_IN_VERSION/PF_PLUG_IN_SUBVERS
 #include "Border_Version.h"
 
-#ifndef AE_OS_WIN
-    #include <AE_General.r>
+/* Include AE_General.r for resource definitions on Mac */
+#ifdef AE_OS_MAC
+	#include <AE_General.r>
+#endif
+
+#if defined(__MACH__) && !defined(AE_OS_MAC)
+	#define AE_OS_MAC 1
+	#include <AE_General.r>
 #endif
     
 resource 'PiPL' (16000) {

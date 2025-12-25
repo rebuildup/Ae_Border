@@ -526,6 +526,10 @@ jobs:
             -arch arm64 \
             -destination 'platform=macOS' \
             CONFIGURATION_BUILD_DIR="$(pwd)/build" \
+            HEADER_SEARCH_PATHS="$SDK_ROOT/Headers $SDK_ROOT/Util $SDK_ROOT/Headers/SP $SDK_ROOT/Resources" \
+            REZ_SEARCH_PATHS="$SDK_ROOT/Headers $SDK_ROOT/Headers/SP $SDK_ROOT/Resources" \
+            GCC_SYMBOLS_PRIVATE_EXTERN=NO \
+            EXPORTED_SYMBOLS_FILE="$(pwd)/Border.exp" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -559,6 +563,79 @@ jobs:
           fi
           
           if [ -n "$PLUGIN_PATH" ]; then
+            echo "Generating PiPL resource..."
+            "${{ github.workspace }}/Mac/build_pipl.sh" "$PLUGIN_DIR" "$PLUGIN_PATH" "$SDK_ROOT"
+
+            echo "=== Verifying Plugin Bundle Structure ==="
+            echo "Plugin path: $PLUGIN_PATH"
+            ls -laR "$PLUGIN_PATH" || true
+            
+            BINARY_PATH="$PLUGIN_PATH/Contents/MacOS/Border"
+            RSRC_PATH="$PLUGIN_PATH/Contents/Resources/Border.rsrc"
+            INFO_PATH="$PLUGIN_PATH/Contents/Info.plist"
+            
+            # Verify Info.plist
+            if [ ! -f "$INFO_PATH" ]; then
+              echo "::warning::Info.plist not found, this may cause issues"
+            else
+              echo "✓ Info.plist found"
+            fi
+            
+            # Verify binary
+            if [ ! -f "$BINARY_PATH" ]; then
+              echo "::error::Plugin binary not found at $BINARY_PATH"
+              exit 1
+            fi
+            echo "✓ Binary found: $BINARY_PATH"
+            
+            # Verify binary architectures
+            echo "Binary architectures:"
+            file "$BINARY_PATH" || true
+            lipo -info "$BINARY_PATH" || true
+            
+            # Verify exported symbols
+            echo "Verifying exported entry points..."
+            echo "All exported symbols:"
+            nm -gU "$BINARY_PATH" | head -20 || true
+            
+            nm -gU "$BINARY_PATH" | grep -q " _EffectMain$" || {
+              echo "::error::EffectMain not exported"
+              echo "Available exports containing 'Effect' or 'Main':"
+              nm -gU "$BINARY_PATH" | grep -iE "(effect|main)" || true
+              exit 1
+            }
+            nm -gU "$BINARY_PATH" | grep -q " _PluginDataEntryFunction2$" || {
+              echo "::error::PluginDataEntryFunction2 not exported"
+              exit 1
+            }
+            echo "✓ Verified exports: EffectMain, PluginDataEntryFunction2"
+            
+            # Verify PiPL resource
+            if [ ! -f "$RSRC_PATH" ]; then
+              echo "::error::PiPL resource not found at $RSRC_PATH"
+              exit 1
+            fi
+            echo "✓ PiPL resource found: $RSRC_PATH ($(ls -la "$RSRC_PATH" | awk '{print $5}') bytes)"
+            
+            # Verify PiPL content
+            if strings "$RSRC_PATH" | grep -q "EffectMain"; then
+              echo "✓ PiPL contains 'EffectMain' entry point"
+            else
+              echo "::error::PiPL resource does not contain 'EffectMain' entry point"
+              echo "PiPL resource content:"
+              strings "$RSRC_PATH" || true
+              exit 1
+            fi
+
+            # Apply ad-hoc code signing (required for macOS 14+)
+            echo "Applying ad-hoc code signing..."
+            codesign --force --deep --sign - "$PLUGIN_PATH"
+            echo "Verifying code signature..."
+            codesign --verify --deep --strict --verbose=2 "$PLUGIN_PATH" || {
+              echo "::warning::Ad-hoc signing verification failed, but continuing..."
+            }
+            echo "✓ Ad-hoc code signing applied"
+
             mkdir -p "${{ github.workspace }}/artifacts"
             cp -R "$PLUGIN_PATH" "${{ github.workspace }}/artifacts/"
             echo "Artifact copied: artifacts/Border.plugin"
@@ -588,7 +665,7 @@ jobs:
             Get-ChildItem
             exit 1
           }
-          
+
           $outputDir = Join-Path (Get-Location).Path "..\output"
           New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
           
@@ -650,6 +727,219 @@ jobs:
             Get-ChildItem -Recurse -Depth 3 | Where-Object { $_.Extension -eq ".aex" -or $_.Name -like "*.obj" } | Select-Object FullName | Format-Table -AutoSize
             exit 1
           }
+
+      - name: Code Sign Plugin (Mac)
+        if: matrix.platform == 'mac'
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_CODESIGN_P12: ${{ secrets.MACOS_CODESIGN_P12 }}
+          MACOS_CODESIGN_PASSWORD: ${{ secrets.MACOS_CODESIGN_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+          
+          PLUGIN_ARTIFACT_PATH="${{ github.workspace }}/artifacts/Border.plugin"
+          
+          if [ -z "$MACOS_CODESIGN_IDENTITY" ] || [ -z "$MACOS_CODESIGN_P12" ] || [ -z "$MACOS_CODESIGN_PASSWORD" ]; then
+            echo "::warning::Code signing secrets not set; applying ad-hoc signature only"
+            codesign --force --deep --sign - "$PLUGIN_ARTIFACT_PATH"
+            exit 0
+          fi
+          
+          if [ ! -d "$PLUGIN_ARTIFACT_PATH" ]; then
+            echo "::error::Plugin artifact not found at $PLUGIN_ARTIFACT_PATH"
+            exit 1
+          fi
+          
+          KEYCHAIN_PASSWORD="${MACOS_KEYCHAIN_PASSWORD:-temp_keychain_password}"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/codesign.p12"
+          
+          echo "=== Setting up code signing ==="
+          echo "Identity: $MACOS_CODESIGN_IDENTITY"
+          
+          # Decode the certificate
+          echo "$MACOS_CODESIGN_P12" | base64 --decode > "$CERT_PATH"
+          echo "Certificate file size: $(ls -la "$CERT_PATH" | awk '{print $5}') bytes"
+          
+          # Create and configure keychain
+          echo "Creating temporary keychain..."
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          
+          # Import certificate with all necessary options
+          echo "Importing certificate..."
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CODESIGN_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild
+          
+          # Add keychain to search list
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          
+          # Set partition list - allow codesign to access the key without UI prompt
+          echo "Setting partition list..."
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" 2>/dev/null || {
+              echo "::warning::set-key-partition-list returned non-zero, but this may be okay"
+            }
+          
+          # Verify identity is available
+          echo "Verifying available signing identities..."
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+          security find-identity -v -p codesigning || true
+          
+          # Check if our identity is available
+          if ! security find-identity -v -p codesigning | grep -q "$MACOS_CODESIGN_IDENTITY"; then
+            echo "::error::Signing identity not found: $MACOS_CODESIGN_IDENTITY"
+            echo "Available identities:"
+            security find-identity -v -p codesigning
+            exit 1
+          fi
+          
+          echo "=== Code signing plugin ==="
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$MACOS_CODESIGN_IDENTITY" \
+            "$PLUGIN_ARTIFACT_PATH"
+          
+          echo "=== Verifying code signature ==="
+          codesign --verify --deep --strict --verbose=2 "$PLUGIN_ARTIFACT_PATH"
+          
+          echo "✓ Code signing completed successfully"
+          
+          # Cleanup
+          rm -f "$CERT_PATH"
+
+      - name: Notarize Plugin (Mac)
+        if: matrix.platform == 'mac'
+        continue-on-error: true
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          set -e
+          
+          PLUGIN_ARTIFACT_PATH="${{ github.workspace }}/artifacts/Border.plugin"
+          
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::warning::Notarization secrets not set; skipping notarization"
+            exit 0
+          fi
+          
+          if [ -z "$MACOS_CODESIGN_IDENTITY" ]; then
+            echo "::warning::No code signing identity; skipping notarization (ad-hoc signed plugins cannot be notarized)"
+            exit 0
+          fi
+          
+          if [ ! -d "$PLUGIN_ARTIFACT_PATH" ]; then
+            echo "::error::Plugin artifact not found at $PLUGIN_ARTIFACT_PATH"
+            exit 1
+          fi
+          
+          echo "Creating ZIP archive for notarization..."
+          ZIP_PATH="$RUNNER_TEMP/Border.zip"
+          ditto -c -k --keepParent "$PLUGIN_ARTIFACT_PATH" "$ZIP_PATH"
+          
+          echo "Submitting to Apple for notarization..."
+          echo "This may take several minutes..."
+          
+          # Submit and wait with extended timeout for notarization
+          if xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 20m; then
+            
+            echo "Stapling notarization ticket to plugin..."
+            # Note: stapler doesn't support .plugin bundles, but notarization is already complete
+            if xcrun stapler staple "$PLUGIN_ARTIFACT_PATH" 2>&1 | grep -q "incapable"; then
+              echo "::notice::Stapling not supported for .plugin bundles (this is expected)"
+              echo "::notice::The plugin is notarized and will be verified online by macOS"
+            else
+              echo "Verifying notarization..."
+              xcrun stapler validate "$PLUGIN_ARTIFACT_PATH" || true
+            fi
+            
+            echo "✓ Notarization completed successfully"
+            
+            # Create distribution DMG with stapled notarization ticket
+            echo "=== Creating distribution DMG with stapled ticket ==="
+            DMG_PATH="${{ github.workspace }}/artifacts/Border-mac.dmg"
+            TEMP_DMG_DIR="$RUNNER_TEMP/dmg_contents"
+            
+            mkdir -p "$TEMP_DMG_DIR"
+            cp -R "$PLUGIN_ARTIFACT_PATH" "$TEMP_DMG_DIR/"
+            
+            # Create DMG
+            echo "Creating DMG..."
+            hdiutil create -volname "Border" -srcfolder "$TEMP_DMG_DIR" -ov -format UDZO "$DMG_PATH"
+            
+            # Cleanup temp directory
+            rm -rf "$TEMP_DMG_DIR"
+            
+            # Notarize the DMG
+            echo "Submitting DMG to Apple for notarization..."
+            DMG_SUBMISSION_ID=$(xcrun notarytool submit "$DMG_PATH" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait \
+              --timeout 20m \
+              --output-format json | jq -r '.id')
+            
+            if [ -z "$DMG_SUBMISSION_ID" ] || [ "$DMG_SUBMISSION_ID" = "null" ]; then
+              echo "::warning::Failed to get DMG submission ID"
+            else
+              echo "DMG notarization submission ID: $DMG_SUBMISSION_ID"
+              
+              # Check notarization status
+              DMG_STATUS=$(xcrun notarytool info "$DMG_SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --output-format json | jq -r '.status')
+              
+              if [ "$DMG_STATUS" = "Accepted" ]; then
+                echo "✓ DMG notarization accepted"
+                
+                # Staple the notarization ticket to the DMG
+                echo "Stapling notarization ticket to DMG..."
+                xcrun stapler staple "$DMG_PATH"
+                
+                # Verify stapling
+                echo "Verifying DMG stapling..."
+                xcrun stapler validate "$DMG_PATH"
+                
+                echo "✓ Distribution DMG created, notarized, and stapled successfully"
+              else
+                echo "::warning::DMG notarization status: $DMG_STATUS"
+                echo "::warning::DMG created but not stapled"
+              fi
+            fi
+            
+            echo "  DMG path: $DMG_PATH"
+            
+            # Remove standalone .plugin from artifacts (it's now inside the DMG)
+            echo "Removing standalone .plugin from artifacts (now packaged in DMG)..."
+            rm -rf "$PLUGIN_ARTIFACT_PATH"
+          else
+            echo "::warning::Notarization timed out or failed. The plugin is signed but not notarized."
+            echo "::warning::You can check notarization status with: xcrun notarytool history --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID"
+            echo "::warning::The signed plugin will still be uploaded as an artifact."
+          fi
+          
+          # Cleanup
+          rm -f "$ZIP_PATH"
+
+
       - name: Verify exported entry points (Windows)
         if: matrix.platform == 'win'
         shell: pwsh
@@ -683,5 +973,3 @@ jobs:
           path: artifacts/
           retention-days: 30
           if-no-files-found: error
-
-
