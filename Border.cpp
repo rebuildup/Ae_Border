@@ -1001,20 +1001,28 @@ SmartRender(
                         float strokeA    = strokeCoverage;
                         float invStrokeA = 1.0f - strokeA;
 
-                        float dstR = dst.red   / (float)PF_MAX_CHAN16; // already premultiplied
-                        float dstG = dst.green / (float)PF_MAX_CHAN16;
-                        float dstB = dst.blue  / (float)PF_MAX_CHAN16;
-
                         float strokeR = edge_color.red   / (float)PF_MAX_CHAN16;
                         float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
                         float strokeB = edge_color.blue  / (float)PF_MAX_CHAN16;
 
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
 
-                        // Composite premultiplied: dst is already premultiplied, so weight by (1-strokeA) only.
-                        float outR = strokeR * strokeA + dstR * invStrokeA;
-                        float outG = strokeG * strokeA + dstG * invStrokeA;
-                        float outB = strokeB * strokeA + dstB * invStrokeA;
+                        float outR, outG, outB;
+                        if (dstAlphaNorm < 0.001f) {
+                            // Transparent background: use stroke color only (avoid blending with black)
+                            outR = strokeR * strokeA;
+                            outG = strokeG * strokeA;
+                            outB = strokeB * strokeA;
+                        } else {
+                            // Opaque/semi-transparent background: proper premultiplied compositing
+                            float dstR = dst.red   / (float)PF_MAX_CHAN16;
+                            float dstG = dst.green / (float)PF_MAX_CHAN16;
+                            float dstB = dst.blue  / (float)PF_MAX_CHAN16;
+                            
+                            outR = strokeR * strokeA + dstR * invStrokeA;
+                            outG = strokeG * strokeA + dstG * invStrokeA;
+                            outB = strokeB * strokeA + dstB * invStrokeA;
+                        }
 
                         dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                         dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
@@ -1079,19 +1087,28 @@ SmartRender(
                         float strokeA    = strokeCoverage;
                         float invStrokeA = 1.0f - strokeA;
 
-                        float dstR = dst.red   / (float)PF_MAX_CHAN8; // premultiplied
-                        float dstG = dst.green / (float)PF_MAX_CHAN8;
-                        float dstB = dst.blue  / (float)PF_MAX_CHAN8;
-
                         float strokeR = color.red   / (float)PF_MAX_CHAN8;
                         float strokeG = color.green / (float)PF_MAX_CHAN8;
                         float strokeB = color.blue  / (float)PF_MAX_CHAN8;
 
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
 
-                        float outR = strokeR * strokeA + dstR * invStrokeA;
-                        float outG = strokeG * strokeA + dstG * invStrokeA;
-                        float outB = strokeB * strokeA + dstB * invStrokeA;
+                        float outR, outG, outB;
+                        if (dstAlphaNorm < 0.001f) {
+                            // Transparent background: use stroke color only (avoid blending with black)
+                            outR = strokeR * strokeA;
+                            outG = strokeG * strokeA;
+                            outB = strokeB * strokeA;
+                        } else {
+                            // Opaque/semi-transparent background: proper premultiplied compositing
+                            float dstR = dst.red   / (float)PF_MAX_CHAN8;
+                            float dstG = dst.green / (float)PF_MAX_CHAN8;
+                            float dstB = dst.blue  / (float)PF_MAX_CHAN8;
+                            
+                            outR = strokeR * strokeA + dstR * invStrokeA;
+                            outG = strokeG * strokeA + dstG * invStrokeA;
+                            outB = strokeB * strokeA + dstB * invStrokeA;
+                        }
 
                         dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                         dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
@@ -1380,18 +1397,28 @@ Render(
                     float strokeA = strokeCoverage;
                     float invStrokeA = 1.0f - strokeA;
 
-                    float dstR = dst.red / (float)PF_MAX_CHAN16;
-                    float dstG = dst.green / (float)PF_MAX_CHAN16;
-                    float dstB = dst.blue / (float)PF_MAX_CHAN16;
-
                     float strokeR = edge_color.red / (float)PF_MAX_CHAN16;
                     float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
                     float strokeB = edge_color.blue / (float)PF_MAX_CHAN16;
 
                     float outA = strokeA + dstAlphaNorm * invStrokeA;
-                    float outR = strokeR * strokeA + dstR * invStrokeA;
-                    float outG = strokeG * strokeA + dstG * invStrokeA;
-                    float outB = strokeB * strokeA + dstB * invStrokeA;
+
+                    float outR, outG, outB;
+                    if (dstAlphaNorm < 0.001f) {
+                        // Transparent background: use stroke color only (avoid blending with black)
+                        outR = strokeR * strokeA;
+                        outG = strokeG * strokeA;
+                        outB = strokeB * strokeA;
+                    } else {
+                        // Opaque/semi-transparent background: proper premultiplied compositing
+                        float dstR = dst.red / (float)PF_MAX_CHAN16;
+                        float dstG = dst.green / (float)PF_MAX_CHAN16;
+                        float dstB = dst.blue / (float)PF_MAX_CHAN16;
+                        
+                        outR = strokeR * strokeA + dstR * invStrokeA;
+                        outG = strokeG * strokeA + dstG * invStrokeA;
+                        outB = strokeB * strokeA + dstB * invStrokeA;
+                    }
 
                     dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                     dst.red = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
@@ -1451,18 +1478,28 @@ Render(
                     float strokeA = strokeCoverage;
                     float invStrokeA = 1.0f - strokeA;
 
-                    float dstR = dst.red / (float)PF_MAX_CHAN8;
-                    float dstG = dst.green / (float)PF_MAX_CHAN8;
-                    float dstB = dst.blue / (float)PF_MAX_CHAN8;
-
                     float strokeR = color.red / (float)PF_MAX_CHAN8;
                     float strokeG = color.green / (float)PF_MAX_CHAN8;
                     float strokeB = color.blue / (float)PF_MAX_CHAN8;
 
                     float outA = strokeA + dstAlphaNorm * invStrokeA;
-                    float outR = strokeR * strokeA + dstR * invStrokeA;
-                    float outG = strokeG * strokeA + dstG * invStrokeA;
-                    float outB = strokeB * strokeA + dstB * invStrokeA;
+
+                    float outR, outG, outB;
+                    if (dstAlphaNorm < 0.001f) {
+                        // Transparent background: use stroke color only (avoid blending with black)
+                        outR = strokeR * strokeA;
+                        outG = strokeG * strokeA;
+                        outB = strokeB * strokeA;
+                    } else {
+                        // Opaque/semi-transparent background: proper premultiplied compositing
+                        float dstR = dst.red / (float)PF_MAX_CHAN8;
+                        float dstG = dst.green / (float)PF_MAX_CHAN8;
+                        float dstB = dst.blue / (float)PF_MAX_CHAN8;
+                        
+                        outR = strokeR * strokeA + dstR * invStrokeA;
+                        outG = strokeG * strokeA + dstG * invStrokeA;
+                        outB = strokeB * strokeA + dstB * invStrokeA;
+                    }
 
                     dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                     dst.red = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
