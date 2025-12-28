@@ -920,24 +920,20 @@ SmartRender(
 
         auto strokeSampleCoverage = [&](float sdf) -> float {
             // sdf: + inside, - outside (pixels, boundary at 0)
-            // Build a soft half-space mask around the boundary to avoid hard sign cuts
-            // which can look like a 1px lateral bias on AA edges due to interpolation.
-            float sideMask = 1.0f;
+            // SIMPLIFIED: Hard edge without anti-aliasing (let AE handle AA)
+            float evalDist;
             if (direction == DIRECTION_INSIDE) {
-                // 0 when clearly outside, 1 when inside/on boundary
-                sideMask = smoothstep(-AA_RANGE, 0.0f, sdf);
-                sdf = CLAMP(sdf, 0.0f, 1e9f);
+                if (sdf < 0.0f) return 0.0f; // outside the shape
+                evalDist = sdf;
             } else if (direction == DIRECTION_OUTSIDE) {
-                // 0 when clearly inside, 1 when outside/on boundary
-                sideMask = 1.0f - smoothstep(0.0f, AA_RANGE, sdf);
-                sdf = CLAMP(-sdf, 0.0f, 1e9f);
+                if (sdf > 0.0f) return 0.0f; // inside the shape
+                evalDist = -sdf;
             } else {
-                sdf = fabsf(sdf);
+                evalDist = fabsf(sdf);
             }
 
-            if (sdf > strokeThicknessF + AA_RANGE) return 0.0f;
-            float stroke = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, sdf);
-            return stroke * sideMask;
+            // Hard edge: 1 if within stroke, 0 otherwise
+            return (evalDist <= strokeThicknessF) ? 1.0f : 0.0f;
         };
 
         if (PF_WORLD_IS_DEEP(output)) {
@@ -957,9 +953,7 @@ SmartRender(
                     PF_Pixel16 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
-                    // Adaptive supersample:
-                    // Use center coverage for the vast majority of pixels and only do 2x2
-                    // bilinear sampling near the anti-aliased stroke edge.
+                    // Use center sample only (no supersampling for hard edges)
                     float sdfC = sdfCenterAdjusted(ix, iy);
                     float distC;
                     if (direction == DIRECTION_INSIDE) {
@@ -974,21 +968,7 @@ SmartRender(
                     float strokeCoverage = strokeSampleCoverage(sdfC);
                     if (strokeCoverage < 0.001f) continue;
 
-                    bool needSupersample = (strokeCoverage < 0.999f);
-                    if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
-                        needSupersample = true;
-                    }
-                    if (needSupersample) {
-                        strokeCoverage = 0.0f;
-                        for (int s = 0; s < 4; ++s) {
-                            float fx = (float)ix + 0.5f + sampleOffsets[s][0];
-                            float fy = (float)iy + 0.5f + sampleOffsets[s][1];
-                            float sdf = sampleSDF(fx, fy); // + inside, - outside
-                            strokeCoverage += strokeSampleCoverage(sdf);
-                        }
-                        strokeCoverage *= 0.25f;
-                        if (strokeCoverage < 0.001f) continue;
-                    }
+                    // No supersampling needed for hard edges
 
                     if (showLineOnly) {
                         // Line only: just draw the stroke (premultiplied)
@@ -1045,7 +1025,7 @@ SmartRender(
                     PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
-                    // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                    // Use center sample only (no supersampling for hard edges)
                     float sdfC = sdfCenterAdjusted(ix, iy);
                     float distC;
                     if (direction == DIRECTION_INSIDE) {
@@ -1060,21 +1040,7 @@ SmartRender(
                     float strokeCoverage = strokeSampleCoverage(sdfC);
                     if (strokeCoverage < 0.001f) continue;
 
-                    bool needSupersample = (strokeCoverage < 0.999f);
-                    if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
-                        needSupersample = true;
-                    }
-                    if (needSupersample) {
-                        strokeCoverage = 0.0f;
-                        for (int s = 0; s < 4; ++s) {
-                            float fx = (float)ix + 0.5f + sampleOffsets[s][0];
-                            float fy = (float)iy + 0.5f + sampleOffsets[s][1];
-                            float sdf = sampleSDF(fx, fy);
-                            strokeCoverage += strokeSampleCoverage(sdf);
-                        }
-                        strokeCoverage *= 0.25f;
-                        if (strokeCoverage < 0.001f) continue;
-                    }
+                    // No supersampling needed for hard edges
                     
                     if (showLineOnly) {
                         // Line only: just draw the stroke (premultiplied)
@@ -1326,20 +1292,21 @@ Render(
     };
 
     auto strokeSampleCoverage = [&](float sdf) -> float {
-        float sideMask = 1.0f;
+        // sdf: + inside, - outside (pixels, boundary at 0)
+        // SIMPLIFIED: Hard edge without anti-aliasing (let AE handle AA)
+        float evalDist;
         if (direction == DIRECTION_INSIDE) {
-            sideMask = smoothstep(-AA_RANGE, 0.0f, sdf);
-            sdf = CLAMP(sdf, 0.0f, 1e9f);
+            if (sdf < 0.0f) return 0.0f; // outside the shape
+            evalDist = sdf;
         } else if (direction == DIRECTION_OUTSIDE) {
-            sideMask = 1.0f - smoothstep(0.0f, AA_RANGE, sdf);
-            sdf = CLAMP(-sdf, 0.0f, 1e9f);
+            if (sdf > 0.0f) return 0.0f; // inside the shape
+            evalDist = -sdf;
         } else {
-            sdf = fabsf(sdf);
+            evalDist = fabsf(sdf);
         }
 
-        if (sdf > strokeThicknessF + AA_RANGE) return 0.0f;
-        float stroke = 1.0f - smoothstep(strokeThicknessF, strokeThicknessF + AA_RANGE, sdf);
-        return stroke * sideMask;
+        // Hard edge: 1 if within stroke, 0 otherwise
+        return (evalDist <= strokeThicknessF) ? 1.0f : 0.0f;
     };
 
     if (PF_WORLD_IS_DEEP(output)) {
@@ -1357,7 +1324,7 @@ Render(
                 PF_Pixel16 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
-                // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                // Use center sample only (no supersampling for hard edges)
                 float sdfC = sdfCenterAdjusted(ox, oy);
                 float distC;
                 if (direction == DIRECTION_INSIDE) {
@@ -1372,21 +1339,7 @@ Render(
                 float strokeCoverage = strokeSampleCoverage(sdfC);
                 if (strokeCoverage < 0.001f) continue;
 
-                bool needSupersample = (strokeCoverage < 0.999f);
-                if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
-                    needSupersample = true;
-                }
-                if (needSupersample) {
-                    strokeCoverage = 0.0f;
-                    for (int s = 0; s < 4; ++s) {
-                        float fx = (float)ox + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)oy + 0.5f + sampleOffsets[s][1];
-                        float sdf = sampleSDF(fx, fy);
-                        strokeCoverage += strokeSampleCoverage(sdf);
-                    }
-                    strokeCoverage *= 0.25f;
-                    if (strokeCoverage < 0.001f) continue;
-                }
+                // No supersampling needed for hard edges
 
                 if (showLineOnly) {
                     dst.red = (A_u_short)(edge_color.red * strokeCoverage);
@@ -1438,7 +1391,7 @@ Render(
                 PF_Pixel8 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
-                // Adaptive supersample: only do 2x2 bilinear sampling near the AA edge.
+                // Use center sample only (no supersampling for hard edges)
                 float sdfC = sdfCenterAdjusted(ox, oy);
                 float distC;
                 if (direction == DIRECTION_INSIDE) {
@@ -1453,21 +1406,7 @@ Render(
                 float strokeCoverage = strokeSampleCoverage(sdfC);
                 if (strokeCoverage < 0.001f) continue;
 
-                bool needSupersample = (strokeCoverage < 0.999f);
-                if (!needSupersample && fabsf(distC - strokeThicknessF) < 1.0f) {
-                    needSupersample = true;
-                }
-                if (needSupersample) {
-                    strokeCoverage = 0.0f;
-                    for (int s = 0; s < 4; ++s) {
-                        float fx = (float)ox + 0.5f + sampleOffsets[s][0];
-                        float fy = (float)oy + 0.5f + sampleOffsets[s][1];
-                        float sdf = sampleSDF(fx, fy);
-                        strokeCoverage += strokeSampleCoverage(sdf);
-                    }
-                    strokeCoverage *= 0.25f;
-                    if (strokeCoverage < 0.001f) continue;
-                }
+                // No supersampling needed for hard edges
 
                 if (showLineOnly) {
                     dst.red = (A_u_char)(color.red * strokeCoverage);
