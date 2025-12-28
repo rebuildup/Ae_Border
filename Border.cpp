@@ -807,76 +807,79 @@ SmartRender(
         ERR(ComputeSignedDistanceField(input, thresholdSdf8, thresholdSdf16, signedDist,
             input->width, input->height));
 
-        // STEP 1: Clear the output buffer to transparency
+        // STEP 1 & 2: Clear output and optionally copy source (optimized with memset/memcpy)
+        const A_long outW = output->width;
+        const A_long outH = output->height;
+        const A_long inW = input->width;
+        const A_long inH = input->height;
+
         if (PF_WORLD_IS_DEEP(output)) {
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + y * output->rowbytes);
-                for (A_long x = 0; x < output->width; x++) {
-                    outData[x].alpha = 0;
-                    outData[x].red = 0;
-                    outData[x].green = 0;
-                    outData[x].blue = 0;
-                }
-            }
-        }
-        else {
-            for (A_long y = 0; y < output->height; y++) {
-                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + y * output->rowbytes);
-                for (A_long x = 0; x < output->width; x++) {
-                    outData[x].alpha = 0;
-                    outData[x].red = 0;
-                    outData[x].green = 0;
-                    outData[x].blue = 0;
-                }
-            }
-        }
-
-        // STEP 2: Copy the source layer if not "show line only"
-        if (!showLineOnly) {
-            if (PF_WORLD_IS_DEEP(output)) {
-                for (A_long oy = 0; oy < output->height; ++oy) {
-                    A_long iy = oy - offsetY;
-                    if (iy < 0 || iy >= input->height) continue;
-
-                    PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
-                    PF_Pixel16* inData  = (PF_Pixel16*)((char*)input->data  + iy * input->rowbytes);
-
-                    for (A_long ox = 0; ox < output->width; ++ox) {
-                        A_long ix = ox - offsetX;
-                        if (ix < 0 || ix >= input->width) continue;
-                        outData[ox] = inData[ix];
+            const size_t pxSize = sizeof(PF_Pixel16);
+            BorderParallelFor(outH, [&](A_long oy) {
+                PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
+                const A_long iy = oy - offsetY;
+                const bool inYRange = (iy >= 0 && iy < inH);
+                
+                if (!showLineOnly && inYRange) {
+                    // Clear left margin
+                    if (offsetX > 0) {
+                        memset(outData, 0, (size_t)offsetX * pxSize);
                     }
-                }
-            }
-            else {
-                for (A_long oy = 0; oy < output->height; ++oy) {
-                    A_long iy = oy - offsetY;
-                    if (iy < 0 || iy >= input->height) continue;
-
-                    PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
-                    PF_Pixel8* inData  = (PF_Pixel8*)((char*)input->data  + iy * input->rowbytes);
-
-                    for (A_long ox = 0; ox < output->width; ++ox) {
-                        A_long ix = ox - offsetX;
-                        if (ix < 0 || ix >= input->width) continue;
-                        outData[ox] = inData[ix];
+                    // Copy source pixels
+                    const A_long startX = (std::max)(0L, offsetX);
+                    const A_long endX = (std::min)(outW, offsetX + inW);
+                    if (endX > startX) {
+                        PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
+                        const A_long srcStartX = startX - offsetX;
+                        memcpy(outData + startX, inData + srcStartX, (size_t)(endX - startX) * pxSize);
                     }
+                    // Clear right margin
+                    if (endX < outW) {
+                        memset(outData + endX, 0, (size_t)(outW - endX) * pxSize);
+                    }
+                } else {
+                    // Clear entire row
+                    memset(outData, 0, (size_t)outW * pxSize);
                 }
-            }
+            });
+        } else {
+            const size_t pxSize = sizeof(PF_Pixel8);
+            BorderParallelFor(outH, [&](A_long oy) {
+                PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
+                const A_long iy = oy - offsetY;
+                const bool inYRange = (iy >= 0 && iy < inH);
+                
+                if (!showLineOnly && inYRange) {
+                    // Clear left margin
+                    if (offsetX > 0) {
+                        memset(outData, 0, (size_t)offsetX * pxSize);
+                    }
+                    // Copy source pixels
+                    const A_long startX = (std::max)(0L, offsetX);
+                    const A_long endX = (std::min)(outW, offsetX + inW);
+                    if (endX > startX) {
+                        PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
+                        const A_long srcStartX = startX - offsetX;
+                        memcpy(outData + startX, inData + srcStartX, (size_t)(endX - startX) * pxSize);
+                    }
+                    // Clear right margin
+                    if (endX < outW) {
+                        memset(outData + endX, 0, (size_t)(outW - endX) * pxSize);
+                    }
+                } else {
+                    // Clear entire row
+                    memset(outData, 0, (size_t)outW * pxSize);
+                }
+            });
         }
 
-        // STEP 3: Draw the border using signed distance. We supersample 2x2 per pixel
-        // with bilinear SDF lookup to get stable AA on diagonals and at Inside/Outside edges.
+        // STEP 3: Draw the border using signed distance.
         if (strokeThicknessF <= 0.0f) {
             ERR(extra->cb->checkin_layer_pixels(in_data->effect_ref, checkout_id));
             return err; // stroke width 0 → nothing to draw
         }
 
-        // Cache commonly used values
-        const A_long inW = input->width;
-        const A_long inH = input->height;
-        const A_long outW = output->width;
-        const A_long outH = output->height;
+        // SDF data pointer
         const int* sdfData = signedDist.data();
 
         // Inline SDF lookup for speed
