@@ -871,69 +871,22 @@ SmartRender(
             ERR(extra->cb->checkin_layer_pixels(in_data->effect_ref, checkout_id));
             return err; // stroke width 0 → nothing to draw
         }
-        const float AA_RANGE = 1.0f; // feather width (pixels)
 
-        auto sampleSDF = [&](float fx, float fy) -> float {
-            // Bilinear sample of signedDist (stored scaled by 10)
-            fx = CLAMP(fx, 0.0f, input->width  - 1.001f);
-            fy = CLAMP(fy, 0.0f, input->height - 1.001f);
-            int x0 = (int)fx;
-            int y0 = (int)fy;
-            int x1 = MIN(x0 + 1, input->width  - 1);
-            int y1 = MIN(y0 + 1, input->height - 1);
-            float tx = fx - x0;
-            float ty = fy - y0;
+        // Cache commonly used values
+        const A_long inW = input->width;
+        const A_long inH = input->height;
+        const A_long outW = output->width;
+        const A_long outH = output->height;
+        const int* sdfData = signedDist.data();
 
-            int d00 = signedDist[y0 * input->width + x0];
-            int d10 = signedDist[y0 * input->width + x1];
-            int d01 = signedDist[y1 * input->width + x0];
-            int d11 = signedDist[y1 * input->width + x1];
-
-            float d0 = d00 + (d10 - d00) * tx;
-            float d1 = d01 + (d11 - d01) * tx;
-            float d = d0 + (d1 - d0) * ty;
-            // Convert back to pixels. Our SDF is based on EDT between pixel centers,
-            // so the boundary is halfway between opposite-class pixels.
-            // Adjust by ±0.5px so distance is measured to the boundary (pixel edge).
-            float sdf = d * 0.1f;
+        // Inline SDF lookup for speed
+        auto getSDF = [=](A_long ix, A_long iy) -> float {
+            ix = CLAMP(ix, (A_long)0, inW - 1);
+            iy = CLAMP(iy, (A_long)0, inH - 1);
+            float sdf = sdfData[(size_t)iy * (size_t)inW + (size_t)ix] * 0.1f;
             if (sdf > 0.0f) sdf -= 0.5f;
             else if (sdf < 0.0f) sdf += 0.5f;
             return sdf;
-        };
-
-        const float sampleOffsets[4][2] = {
-            {-0.25f, -0.25f}, { 0.25f, -0.25f},
-            {-0.25f,  0.25f}, { 0.25f,  0.25f}
-        };
-
-        auto sdfCenterAdjusted = [&](A_long ix, A_long iy) -> float {
-            // Center sample without bilinear (fast path), adjusted to boundary (pixel edge).
-            ix = CLAMP(ix, (A_long)0, input->width - 1);
-            iy = CLAMP(iy, (A_long)0, input->height - 1);
-            float sdf = signedDist[(size_t)iy * (size_t)input->width + (size_t)ix] * 0.1f;
-            if (sdf > 0.0f) sdf -= 0.5f;
-            else if (sdf < 0.0f) sdf += 0.5f;
-            return sdf;
-        };
-
-        const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f; // small guard band
-
-        auto strokeSampleCoverage = [&](float sdf) -> float {
-            // sdf: + inside, - outside (pixels, boundary at 0)
-            // SIMPLIFIED: Hard edge without anti-aliasing (let AE handle AA)
-            float evalDist;
-            if (direction == DIRECTION_INSIDE) {
-                if (sdf < 0.0f) return 0.0f; // outside the shape
-                evalDist = sdf;
-            } else if (direction == DIRECTION_OUTSIDE) {
-                if (sdf > 0.0f) return 0.0f; // inside the shape
-                evalDist = -sdf;
-            } else {
-                evalDist = fabsf(sdf);
-            }
-
-            // Hard edge: 1 if within stroke, 0 otherwise
-            return (evalDist <= strokeThicknessF) ? 1.0f : 0.0f;
         };
 
         if (PF_WORLD_IS_DEEP(output)) {
@@ -943,148 +896,83 @@ SmartRender(
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            for (A_long oy = 0; oy < output->height; ++oy) {
+            // Parallel processing of rows
+            BorderParallelFor(outH, [&, getSDF, edge_color, offsetX, offsetY, inW, inH, outW, 
+                                      strokeThicknessF, MAX_EVAL_DIST, direction, showLineOnly](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
-                for (A_long ox = 0; ox < output->width; ++ox) {
-                    A_long ix = ox - offsetX;
-                    A_long iy = oy - offsetY;
-                    if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) continue;
+                const A_long iy = oy - offsetY;
+                if (iy < 0 || iy >= inH) return;
+
+                for (A_long ox = 0; ox < outW; ++ox) {
+                    const A_long ix = ox - offsetX;
+                    if (ix < 0 || ix >= inW) continue;
+
+                    const float sdfC = getSDF(ix, iy);
+                    float distC;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < 0.0f) continue;
+                        distC = sdfC;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > 0.0f) continue;
+                        distC = -sdfC;
+                    } else {
+                        distC = fabsf(sdfC);
+                    }
+                    if (distC > strokeThicknessF) continue;
 
                     PF_Pixel16 dst = outData[ox];
-                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
-
-                    // Use center sample only (no supersampling for hard edges)
-                    float sdfC = sdfCenterAdjusted(ix, iy);
-                    float distC;
-                    if (direction == DIRECTION_INSIDE) {
-                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
-                    } else {
-                        distC = fabsf(sdfC);
-                    }
-                    if (distC > MAX_EVAL_DIST) continue;
-
-                    float strokeCoverage = strokeSampleCoverage(sdfC);
-                    if (strokeCoverage < 0.001f) continue;
-
-                    // No supersampling needed for hard edges
 
                     if (showLineOnly) {
-                        // Line only: just draw the stroke (premultiplied)
-                        dst.red   = (A_u_short)(edge_color.red   * strokeCoverage);
-                        dst.green = (A_u_short)(edge_color.green * strokeCoverage);
-                        dst.blue  = (A_u_short)(edge_color.blue  * strokeCoverage);
-                        dst.alpha = (A_u_short)(PF_MAX_CHAN16    * strokeCoverage);
+                        dst.red   = edge_color.red;
+                        dst.green = edge_color.green;
+                        dst.blue  = edge_color.blue;
+                        dst.alpha = PF_MAX_CHAN16;
                     } else {
-                        // Proper premultiplied alpha compositing: stroke OVER dst
-                        float strokeA    = strokeCoverage;
-                        float invStrokeA = 1.0f - strokeA;
-
-                        float strokeR = edge_color.red   / (float)PF_MAX_CHAN16;
-                        float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
-                        float strokeB = edge_color.blue  / (float)PF_MAX_CHAN16;
-
-                        float outA = strokeA + dstAlphaNorm * invStrokeA;
-
-                        float outR, outG, outB;
-                        if (dstAlphaNorm < 0.001f) {
-                            // Transparent background: use stroke color only (avoid blending with black)
-                            outR = strokeR * strokeA;
-                            outG = strokeG * strokeA;
-                            outB = strokeB * strokeA;
-                        } else {
-                            // Opaque/semi-transparent background: proper premultiplied compositing
-                            float dstR = dst.red   / (float)PF_MAX_CHAN16;
-                            float dstG = dst.green / (float)PF_MAX_CHAN16;
-                            float dstB = dst.blue  / (float)PF_MAX_CHAN16;
-                            
-                            outR = strokeR * strokeA + dstR * invStrokeA;
-                            outG = strokeG * strokeA + dstG * invStrokeA;
-                            outB = strokeB * strokeA + dstB * invStrokeA;
-                        }
-
-                        dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.green = (A_u_short)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.blue  = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        // Simple compositing: stroke replaces dst where stroke is drawn
+                        dst.red   = edge_color.red;
+                        dst.green = edge_color.green;
+                        dst.blue  = edge_color.blue;
+                        dst.alpha = PF_MAX_CHAN16;
                     }
 
                     outData[ox] = dst;
                 }
-            }
+            });
         }
         else {
-            for (A_long oy = 0; oy < output->height; ++oy) {
+            // Parallel processing of rows (8-bit)
+            BorderParallelFor(outH, [&, getSDF, color, offsetX, offsetY, inW, inH, outW, 
+                                      strokeThicknessF, direction, showLineOnly](A_long oy) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
-                for (A_long ox = 0; ox < output->width; ++ox) {
-                    A_long ix = ox - offsetX;
-                    A_long iy = oy - offsetY;
-                    if (ix < 0 || ix >= input->width || iy < 0 || iy >= input->height) continue;
+                const A_long iy = oy - offsetY;
+                if (iy < 0 || iy >= inH) return;
 
-                    PF_Pixel8 dst = outData[ox];
-                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
+                for (A_long ox = 0; ox < outW; ++ox) {
+                    const A_long ix = ox - offsetX;
+                    if (ix < 0 || ix >= inW) continue;
 
-                    // Use center sample only (no supersampling for hard edges)
-                    float sdfC = sdfCenterAdjusted(ix, iy);
+                    const float sdfC = getSDF(ix, iy);
                     float distC;
                     if (direction == DIRECTION_INSIDE) {
-                        distC = (sdfC > 0.0f) ? sdfC : 0.0f;
+                        if (sdfC < 0.0f) continue;
+                        distC = sdfC;
                     } else if (direction == DIRECTION_OUTSIDE) {
-                        distC = (sdfC < 0.0f) ? -sdfC : 0.0f;
+                        if (sdfC > 0.0f) continue;
+                        distC = -sdfC;
                     } else {
                         distC = fabsf(sdfC);
                     }
-                    if (distC > MAX_EVAL_DIST) continue;
+                    if (distC > strokeThicknessF) continue;
 
-                    float strokeCoverage = strokeSampleCoverage(sdfC);
-                    if (strokeCoverage < 0.001f) continue;
-
-                    // No supersampling needed for hard edges
-                    
-                    if (showLineOnly) {
-                        // Line only: just draw the stroke (premultiplied)
-                        dst.red   = (A_u_char)(color.red   * strokeCoverage);
-                        dst.green = (A_u_char)(color.green * strokeCoverage);
-                        dst.blue  = (A_u_char)(color.blue  * strokeCoverage);
-                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage);
-                    } else {
-                        // Proper premultiplied alpha compositing: stroke OVER dst
-                        float strokeA    = strokeCoverage;
-                        float invStrokeA = 1.0f - strokeA;
-
-                        float strokeR = color.red   / (float)PF_MAX_CHAN8;
-                        float strokeG = color.green / (float)PF_MAX_CHAN8;
-                        float strokeB = color.blue  / (float)PF_MAX_CHAN8;
-
-                        float outA = strokeA + dstAlphaNorm * invStrokeA;
-
-                        float outR, outG, outB;
-                        if (dstAlphaNorm < 0.001f) {
-                            // Transparent background: use stroke color only (avoid blending with black)
-                            outR = strokeR * strokeA;
-                            outG = strokeG * strokeA;
-                            outB = strokeB * strokeA;
-                        } else {
-                            // Opaque/semi-transparent background: proper premultiplied compositing
-                            float dstR = dst.red   / (float)PF_MAX_CHAN8;
-                            float dstG = dst.green / (float)PF_MAX_CHAN8;
-                            float dstB = dst.blue  / (float)PF_MAX_CHAN8;
-                            
-                            outR = strokeR * strokeA + dstR * invStrokeA;
-                            outG = strokeG * strokeA + dstG * invStrokeA;
-                            outB = strokeB * strokeA + dstB * invStrokeA;
-                        }
-
-                        dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.green = (A_u_char)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.blue  = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                    }
+                    PF_Pixel8 dst;
+                    dst.red   = color.red;
+                    dst.green = color.green;
+                    dst.blue  = color.blue;
+                    dst.alpha = PF_MAX_CHAN8;
 
                     outData[ox] = dst;
                 }
-            }
+            });
         }
     }
 
