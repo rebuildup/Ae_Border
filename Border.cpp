@@ -898,7 +898,7 @@ SmartRender(
 
             // Parallel processing of rows
             BorderParallelFor(outH, [&, getSDF, edge_color, offsetX, offsetY, inW, inH, outW, 
-                                      strokeThicknessF, MAX_EVAL_DIST, direction, showLineOnly](A_long oy) {
+                                      strokeThicknessF, direction, showLineOnly](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
                 const A_long iy = oy - offsetY;
                 if (iy < 0 || iy >= inH) return;
