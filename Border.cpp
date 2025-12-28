@@ -826,8 +826,8 @@ SmartRender(
                         memset(outData, 0, (size_t)offsetX * pxSize);
                     }
                     // Copy source pixels
-                    const A_long startX = (std::max)(0L, offsetX);
-                    const A_long endX = (std::min)(outW, offsetX + inW);
+                    const A_long startX = (offsetX > 0) ? offsetX : (A_long)0;
+                    const A_long endX = (offsetX + inW < outW) ? (offsetX + inW) : outW;
                     if (endX > startX) {
                         PF_Pixel16* inData = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes);
                         const A_long srcStartX = startX - offsetX;
@@ -855,8 +855,8 @@ SmartRender(
                         memset(outData, 0, (size_t)offsetX * pxSize);
                     }
                     // Copy source pixels
-                    const A_long startX = (std::max)(0L, offsetX);
-                    const A_long endX = (std::min)(outW, offsetX + inW);
+                    const A_long startX = (offsetX > 0) ? offsetX : (A_long)0;
+                    const A_long endX = (offsetX + inW < outW) ? (offsetX + inW) : outW;
                     if (endX > startX) {
                         PF_Pixel8* inData = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes);
                         const A_long srcStartX = startX - offsetX;
