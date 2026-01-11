@@ -922,7 +922,7 @@ SmartRender(
                         evalDist = fabsf(sdfC);
                     }
                     
-                    const float AA_RANGE_SM = 1.0f;
+                    const float AA_RANGE_SM = 0.5f;
                     if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
                     // Calculate anti-aliased coverage using smoothstep
@@ -1000,7 +1000,7 @@ SmartRender(
                         evalDist = fabsf(sdfC);
                     }
                     
-                    const float AA_RANGE_SM = 1.0f;
+                    const float AA_RANGE_SM = 0.5f;
                     if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
                     // Calculate anti-aliased coverage using smoothstep
@@ -1173,7 +1173,7 @@ Render(
         return err;
     }
 
-    const float AA_RANGE = 1.0f;
+    const float AA_RANGE = 0.5f;
     const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     // Compute a tight ROI for the SDF / stroke evaluation.
