@@ -938,12 +938,13 @@ SmartRender(
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
                     if (showLineOnly) {
-                        dst.red   = (A_u_short)(edge_color.red * strokeCov);
-                        dst.green = (A_u_short)(edge_color.green * strokeCov);
-                        dst.blue  = (A_u_short)(edge_color.blue * strokeCov);
-                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCov);
+                        // Straight alpha: color at full intensity, alpha only for transparency
+                        dst.red   = edge_color.red;
+                        dst.green = edge_color.green;
+                        dst.blue  = edge_color.blue;
+                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCov + 0.5f);
                     } else {
-                        // Proper alpha blending with anti-aliased stroke
+                        // Straight alpha compositing (Porter-Duff over)
                         float strokeA = strokeCov;
                         float invStrokeA = 1.0f - strokeA;
                         float strokeR = edge_color.red / (float)PF_MAX_CHAN16;
@@ -951,17 +952,19 @@ SmartRender(
                         float strokeB = edge_color.blue / (float)PF_MAX_CHAN16;
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
                         float outR, outG, outB;
-                        if (dstAlphaNorm < 0.001f) {
-                            outR = strokeR * strokeA;
-                            outG = strokeG * strokeA;
-                            outB = strokeB * strokeA;
-                        } else {
+                        if (outA > 0.001f) {
+                            // Straight alpha: divide by output alpha to get unmultiplied color
                             float dstR = dst.red / (float)PF_MAX_CHAN16;
                             float dstG = dst.green / (float)PF_MAX_CHAN16;
                             float dstB = dst.blue / (float)PF_MAX_CHAN16;
-                            outR = strokeR * strokeA + dstR * invStrokeA;
-                            outG = strokeG * strokeA + dstG * invStrokeA;
-                            outB = strokeB * strokeA + dstB * invStrokeA;
+                            outR = (strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA) / outA;
+                            outG = (strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA) / outA;
+                            outB = (strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA) / outA;
+                        } else {
+                            // Fully transparent: use stroke color (won't be visible anyway)
+                            outR = strokeR;
+                            outG = strokeG;
+                            outB = strokeB;
                         }
                         dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                         dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
@@ -1013,12 +1016,13 @@ SmartRender(
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
                     if (showLineOnly) {
-                        dst.red   = (A_u_char)(color.red * strokeCov);
-                        dst.green = (A_u_char)(color.green * strokeCov);
-                        dst.blue  = (A_u_char)(color.blue * strokeCov);
-                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCov);
+                        // Straight alpha: color at full intensity, alpha only for transparency
+                        dst.red   = color.red;
+                        dst.green = color.green;
+                        dst.blue  = color.blue;
+                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCov + 0.5f);
                     } else {
-                        // Proper alpha blending with anti-aliased stroke
+                        // Straight alpha compositing (Porter-Duff over)
                         float strokeA = strokeCov;
                         float invStrokeA = 1.0f - strokeA;
                         float strokeR = color.red / (float)PF_MAX_CHAN8;
@@ -1026,17 +1030,19 @@ SmartRender(
                         float strokeB = color.blue / (float)PF_MAX_CHAN8;
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
                         float outR, outG, outB;
-                        if (dstAlphaNorm < 0.001f) {
-                            outR = strokeR * strokeA;
-                            outG = strokeG * strokeA;
-                            outB = strokeB * strokeA;
-                        } else {
+                        if (outA > 0.001f) {
+                            // Straight alpha: divide by output alpha to get unmultiplied color
                             float dstR = dst.red / (float)PF_MAX_CHAN8;
                             float dstG = dst.green / (float)PF_MAX_CHAN8;
                             float dstB = dst.blue / (float)PF_MAX_CHAN8;
-                            outR = strokeR * strokeA + dstR * invStrokeA;
-                            outG = strokeG * strokeA + dstG * invStrokeA;
-                            outB = strokeB * strokeA + dstB * invStrokeA;
+                            outR = (strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA) / outA;
+                            outG = (strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA) / outA;
+                            outB = (strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA) / outA;
+                        } else {
+                            // Fully transparent: use stroke color (won't be visible anyway)
+                            outR = strokeR;
+                            outG = strokeG;
+                            outB = strokeB;
                         }
                         dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
                         dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
@@ -1312,11 +1318,13 @@ Render(
                 // No supersampling needed for hard edges
 
                 if (showLineOnly) {
-                    dst.red = (A_u_short)(edge_color.red * strokeCoverage);
-                    dst.green = (A_u_short)(edge_color.green * strokeCoverage);
-                    dst.blue = (A_u_short)(edge_color.blue * strokeCoverage);
-                    dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCoverage);
+                    // Straight alpha: color at full intensity, alpha only for transparency
+                    dst.red = edge_color.red;
+                    dst.green = edge_color.green;
+                    dst.blue = edge_color.blue;
+                    dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCoverage + 0.5f);
                 } else {
+                    // Straight alpha compositing (Porter-Duff over)
                     float strokeA = strokeCoverage;
                     float invStrokeA = 1.0f - strokeA;
 
@@ -1327,20 +1335,19 @@ Render(
                     float outA = strokeA + dstAlphaNorm * invStrokeA;
 
                     float outR, outG, outB;
-                    if (dstAlphaNorm < 0.001f) {
-                        // Transparent background: use stroke color only (avoid blending with black)
-                        outR = strokeR * strokeA;
-                        outG = strokeG * strokeA;
-                        outB = strokeB * strokeA;
-                    } else {
-                        // Opaque/semi-transparent background: proper premultiplied compositing
+                    if (outA > 0.001f) {
+                        // Straight alpha: divide by output alpha to get unmultiplied color
                         float dstR = dst.red / (float)PF_MAX_CHAN16;
                         float dstG = dst.green / (float)PF_MAX_CHAN16;
                         float dstB = dst.blue / (float)PF_MAX_CHAN16;
-                        
-                        outR = strokeR * strokeA + dstR * invStrokeA;
-                        outG = strokeG * strokeA + dstG * invStrokeA;
-                        outB = strokeB * strokeA + dstB * invStrokeA;
+                        outR = (strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA) / outA;
+                        outG = (strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA) / outA;
+                        outB = (strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA) / outA;
+                    } else {
+                        // Fully transparent: use stroke color (won't be visible anyway)
+                        outR = strokeR;
+                        outG = strokeG;
+                        outB = strokeB;
                     }
 
                     dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
@@ -1379,11 +1386,13 @@ Render(
                 // No supersampling needed for hard edges
 
                 if (showLineOnly) {
-                    dst.red = (A_u_char)(color.red * strokeCoverage);
-                    dst.green = (A_u_char)(color.green * strokeCoverage);
-                    dst.blue = (A_u_char)(color.blue * strokeCoverage);
-                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage);
+                    // Straight alpha: color at full intensity, alpha only for transparency
+                    dst.red = color.red;
+                    dst.green = color.green;
+                    dst.blue = color.blue;
+                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage + 0.5f);
                 } else {
+                    // Straight alpha compositing (Porter-Duff over)
                     float strokeA = strokeCoverage;
                     float invStrokeA = 1.0f - strokeA;
 
@@ -1394,20 +1403,19 @@ Render(
                     float outA = strokeA + dstAlphaNorm * invStrokeA;
 
                     float outR, outG, outB;
-                    if (dstAlphaNorm < 0.001f) {
-                        // Transparent background: use stroke color only (avoid blending with black)
-                        outR = strokeR * strokeA;
-                        outG = strokeG * strokeA;
-                        outB = strokeB * strokeA;
-                    } else {
-                        // Opaque/semi-transparent background: proper premultiplied compositing
+                    if (outA > 0.001f) {
+                        // Straight alpha: divide by output alpha to get unmultiplied color
                         float dstR = dst.red / (float)PF_MAX_CHAN8;
                         float dstG = dst.green / (float)PF_MAX_CHAN8;
                         float dstB = dst.blue / (float)PF_MAX_CHAN8;
-                        
-                        outR = strokeR * strokeA + dstR * invStrokeA;
-                        outG = strokeG * strokeA + dstG * invStrokeA;
-                        outB = strokeB * strokeA + dstB * invStrokeA;
+                        outR = (strokeR * strokeA + dstR * dstAlphaNorm * invStrokeA) / outA;
+                        outG = (strokeG * strokeA + dstG * dstAlphaNorm * invStrokeA) / outA;
+                        outB = (strokeB * strokeA + dstB * dstAlphaNorm * invStrokeA) / outA;
+                    } else {
+                        // Fully transparent: use stroke color (won't be visible anyway)
+                        outR = strokeR;
+                        outG = strokeG;
+                        outB = strokeB;
                     }
 
                     dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
