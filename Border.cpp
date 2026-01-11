@@ -928,7 +928,7 @@ SmartRender(
 
             // Parallel processing of rows with 2x2 MSAA
             BorderParallelFor(outH, [&, getSDF_Bilinear, edge_color, offsetX, offsetY, inW, inH, outW, 
-                                      strokeThicknessF, direction, showLineOnly, AA_RANGE_SM, &subpixelOffsets](A_long oy) {
+                                      strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
                 if (fy < -1.0f || fy >= (float)inH) return;
@@ -1019,7 +1019,7 @@ SmartRender(
         else {
             // Parallel processing of rows (8-bit) with 2x2 MSAA
             BorderParallelFor(outH, [&, getSDF_Bilinear, color, offsetX, offsetY, inW, inH, outW, 
-                                      strokeThicknessF, direction, showLineOnly, AA_RANGE_SM, &subpixelOffsets](A_long oy) {
+                                      strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
                 if (fy < -1.0f || fy >= (float)inH) return;
