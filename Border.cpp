@@ -917,8 +917,8 @@ SmartRender(
             }
         };
 
-        // Bilinear interpolated SDF lookup with subpixel edge correction using source alpha
-        auto getSDF_Bilinear = [=, &getSourceAlpha](float fx, float fy) -> float {
+        // Bilinear interpolated SDF lookup for smooth anti-aliasing
+        auto getSDF_Bilinear = [=](float fx, float fy) -> float {
             // Clamp to valid range
             fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
             fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
@@ -945,22 +945,11 @@ SmartRender(
             if (sdf > 0.0f) sdf -= 0.5f;
             else if (sdf < 0.0f) sdf += 0.5f;
             
-            // Subpixel edge correction using source alpha
-            // Only apply near edges (within 1.5px) for efficiency
-            if (fabsf(sdf) < 1.5f) {
-                float srcAlpha = getSourceAlpha(fx, fy);
-                // Invert: outer edge should have lighter (more transparent) pixels
-                // When srcAlpha > 0.5 (inside), push SDF inward (subtract)
-                // When srcAlpha < 0.5 (outside), push SDF outward (add)
-                float alphaOffset = (0.5f - srcAlpha) * 0.8f;
-                sdf += alphaOffset;
-            }
-            
             return sdf;
         };
 
-        // No MSAA needed with subpixel alpha correction - single sample is sufficient
-        const float AA_RANGE_SM = 0.5f;
+        // AA range of 1.0px for smoother edges
+        const float AA_RANGE_SM = 1.0f;
 
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
@@ -969,7 +958,7 @@ SmartRender(
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            // Parallel processing of rows - single sample with subpixel alpha correction
+            // Parallel processing of rows - 2-sample diagonal AA for smoother edges
             BorderParallelFor(outH, [&, getSDF_Bilinear, edge_color, offsetX, offsetY, inW, inH, outW, 
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
@@ -980,28 +969,46 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Single sample with subpixel alpha correction for smooth AA
-                    float sdfC = getSDF_Bilinear(fx, fy);
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
+                    // 2-sample diagonal pattern for smooth edges with minimal performance impact
+                    float totalCoverage = 0.0f;
+                    int validSamples = 0;
+                    
+                    // Sample at two diagonal positions
+                    const float offsets[2][2] = {{-0.25f, -0.25f}, {0.25f, 0.25f}};
+                    
+                    for (int s = 0; s < 2; ++s) {
+                        float sx = fx + offsets[s][0];
+                        float sy = fy + offsets[s][1];
+                        
+                        if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
+                        
+                        float sdfC = getSDF_Bilinear(sx, sy);
+                        float evalDist;
+                        if (direction == DIRECTION_INSIDE) {
+                            if (sdfC < 0.0f) continue;
+                            evalDist = sdfC;
+                        } else if (direction == DIRECTION_OUTSIDE) {
+                            if (sdfC > 0.0f) continue;
+                            evalDist = -sdfC;
+                        } else {
+                            evalDist = fabsf(sdfC);
+                        }
+                        
+                        if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+
+                        // Calculate coverage using smoothstep
+                        float sampleCov;
+                        if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                            sampleCov = 1.0f;
+                        } else {
+                            sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                        }
+                        totalCoverage += sampleCov;
+                        validSamples++;
                     }
                     
-                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
-
-                    // Calculate coverage using smoothstep
-                    float strokeCov;
-                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                        strokeCov = 1.0f;
-                    } else {
-                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                    }
+                    if (validSamples == 0) continue;
+                    float strokeCov = totalCoverage / (float)validSamples;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
@@ -1047,7 +1054,7 @@ SmartRender(
             });
         }
         else {
-            // Parallel processing of rows (8-bit) - single sample with subpixel alpha correction
+            // Parallel processing of rows (8-bit) - 2-sample diagonal AA for smoother edges
             BorderParallelFor(outH, [&, getSDF_Bilinear, color, offsetX, offsetY, inW, inH, outW, 
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
@@ -1058,28 +1065,46 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Single sample with subpixel alpha correction for smooth AA
-                    float sdfC = getSDF_Bilinear(fx, fy);
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
+                    // 2-sample diagonal pattern for smooth edges with minimal performance impact
+                    float totalCoverage = 0.0f;
+                    int validSamples = 0;
+                    
+                    // Sample at two diagonal positions
+                    const float offsets[2][2] = {{-0.25f, -0.25f}, {0.25f, 0.25f}};
+                    
+                    for (int s = 0; s < 2; ++s) {
+                        float sx = fx + offsets[s][0];
+                        float sy = fy + offsets[s][1];
+                        
+                        if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
+                        
+                        float sdfC = getSDF_Bilinear(sx, sy);
+                        float evalDist;
+                        if (direction == DIRECTION_INSIDE) {
+                            if (sdfC < 0.0f) continue;
+                            evalDist = sdfC;
+                        } else if (direction == DIRECTION_OUTSIDE) {
+                            if (sdfC > 0.0f) continue;
+                            evalDist = -sdfC;
+                        } else {
+                            evalDist = fabsf(sdfC);
+                        }
+                        
+                        if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+
+                        // Calculate coverage using smoothstep
+                        float sampleCov;
+                        if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                            sampleCov = 1.0f;
+                        } else {
+                            sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                        }
+                        totalCoverage += sampleCov;
+                        validSamples++;
                     }
                     
-                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
-
-                    // Calculate coverage using smoothstep
-                    float strokeCov;
-                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                        strokeCov = 1.0f;
-                    } else {
-                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                    }
+                    if (validSamples == 0) continue;
+                    float strokeCov = totalCoverage / (float)validSamples;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel8 dst = outData[ox];
@@ -1243,7 +1268,7 @@ Render(
         return err;
     }
 
-    const float AA_RANGE = 0.5f;
+    const float AA_RANGE = 1.0f;
     const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     // Compute a tight ROI for the SDF / stroke evaluation.
@@ -1301,7 +1326,7 @@ Render(
         }
     };
 
-    // Bilinear SDF with subpixel alpha correction
+    // Bilinear SDF lookup for smooth anti-aliasing
     auto sampleSDF = [&](float fx, float fy) -> float {
         fx = CLAMP(fx, (float)roiLeft, (float)roiRight - 0.001f);
         fy = CLAMP(fy, (float)roiTop, (float)roiBottom - 0.001f);
@@ -1326,14 +1351,6 @@ Render(
         float sdf = d * 0.1f;
         if (sdf > 0.0f) sdf -= 0.5f;
         else if (sdf < 0.0f) sdf += 0.5f;
-        
-        // Subpixel edge correction using source alpha
-        if (fabsf(sdf) < 1.5f) {
-            float srcAlpha = getSourceAlphaRender(fx, fy);
-            // Invert: outer edge should have lighter (more transparent) pixels
-            float alphaOffset = (0.5f - srcAlpha) * 0.8f;
-            sdf += alphaOffset;
-        }
         
         return sdf;
     };
