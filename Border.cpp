@@ -969,14 +969,18 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // 2-sample diagonal pattern for smooth edges with minimal performance impact
+                    // Rotated Grid Super Sampling (RGSS) - 4 samples rotated 45 degrees
+                    // More effective for diagonal edges than standard 2x2 grid
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // Sample at two diagonal positions
-                    const float offsets[2][2] = {{-0.25f, -0.25f}, {0.25f, 0.25f}};
+                    // RGSS pattern - optimized for diagonal edges
+                    const float offsets[4][2] = {
+                        {-0.125f, -0.375f}, { 0.375f, -0.125f},
+                        {-0.375f,  0.125f}, { 0.125f,  0.375f}
+                    };
                     
-                    for (int s = 0; s < 2; ++s) {
+                    for (int s = 0; s < 4; ++s) {
                         float sx = fx + offsets[s][0];
                         float sy = fy + offsets[s][1];
                         
@@ -1065,14 +1069,18 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // 2-sample diagonal pattern for smooth edges with minimal performance impact
+                    // Rotated Grid Super Sampling (RGSS) - 4 samples rotated 45 degrees
+                    // More effective for diagonal edges than standard 2x2 grid
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // Sample at two diagonal positions
-                    const float offsets[2][2] = {{-0.25f, -0.25f}, {0.25f, 0.25f}};
+                    // RGSS pattern - optimized for diagonal edges
+                    const float offsets[4][2] = {
+                        {-0.125f, -0.375f}, { 0.375f, -0.125f},
+                        {-0.375f,  0.125f}, { 0.125f,  0.375f}
+                    };
                     
-                    for (int s = 0; s < 2; ++s) {
+                    for (int s = 0; s < 4; ++s) {
                         float sx = fx + offsets[s][0];
                         float sy = fy + offsets[s][1];
                         
