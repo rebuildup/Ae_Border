@@ -911,31 +911,62 @@ SmartRender(
                     if (ix < 0 || ix >= inW) continue;
 
                     const float sdfC = getSDF(ix, iy);
-                    float distC;
+                    float evalDist;
                     if (direction == DIRECTION_INSIDE) {
                         if (sdfC < 0.0f) continue;
-                        distC = sdfC;
+                        evalDist = sdfC;
                     } else if (direction == DIRECTION_OUTSIDE) {
                         if (sdfC > 0.0f) continue;
-                        distC = -sdfC;
+                        evalDist = -sdfC;
                     } else {
-                        distC = fabsf(sdfC);
+                        evalDist = fabsf(sdfC);
                     }
-                    if (distC > strokeThicknessF) continue;
+                    
+                    const float AA_RANGE_SM = 1.0f;
+                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+
+                    // Calculate anti-aliased coverage using smoothstep
+                    float strokeCov;
+                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                        strokeCov = 1.0f;
+                    } else {
+                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                    }
+                    if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
+                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
 
                     if (showLineOnly) {
-                        dst.red   = edge_color.red;
-                        dst.green = edge_color.green;
-                        dst.blue  = edge_color.blue;
-                        dst.alpha = PF_MAX_CHAN16;
+                        dst.red   = (A_u_short)(edge_color.red * strokeCov);
+                        dst.green = (A_u_short)(edge_color.green * strokeCov);
+                        dst.blue  = (A_u_short)(edge_color.blue * strokeCov);
+                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCov);
                     } else {
-                        // Simple compositing: stroke replaces dst where stroke is drawn
-                        dst.red   = edge_color.red;
-                        dst.green = edge_color.green;
-                        dst.blue  = edge_color.blue;
-                        dst.alpha = PF_MAX_CHAN16;
+                        // Proper alpha blending with anti-aliased stroke
+                        float strokeA = strokeCov;
+                        float invStrokeA = 1.0f - strokeA;
+                        float strokeR = edge_color.red / (float)PF_MAX_CHAN16;
+                        float strokeG = edge_color.green / (float)PF_MAX_CHAN16;
+                        float strokeB = edge_color.blue / (float)PF_MAX_CHAN16;
+                        float outA = strokeA + dstAlphaNorm * invStrokeA;
+                        float outR, outG, outB;
+                        if (dstAlphaNorm < 0.001f) {
+                            outR = strokeR * strokeA;
+                            outG = strokeG * strokeA;
+                            outB = strokeB * strokeA;
+                        } else {
+                            float dstR = dst.red / (float)PF_MAX_CHAN16;
+                            float dstG = dst.green / (float)PF_MAX_CHAN16;
+                            float dstB = dst.blue / (float)PF_MAX_CHAN16;
+                            outR = strokeR * strokeA + dstR * invStrokeA;
+                            outG = strokeG * strokeA + dstG * invStrokeA;
+                            outB = strokeB * strokeA + dstB * invStrokeA;
+                        }
+                        dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.green = (A_u_short)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.blue  = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
                     }
 
                     outData[ox] = dst;
@@ -955,23 +986,63 @@ SmartRender(
                     if (ix < 0 || ix >= inW) continue;
 
                     const float sdfC = getSDF(ix, iy);
-                    float distC;
+                    float evalDist;
                     if (direction == DIRECTION_INSIDE) {
                         if (sdfC < 0.0f) continue;
-                        distC = sdfC;
+                        evalDist = sdfC;
                     } else if (direction == DIRECTION_OUTSIDE) {
                         if (sdfC > 0.0f) continue;
-                        distC = -sdfC;
+                        evalDist = -sdfC;
                     } else {
-                        distC = fabsf(sdfC);
+                        evalDist = fabsf(sdfC);
                     }
-                    if (distC > strokeThicknessF) continue;
+                    
+                    const float AA_RANGE_SM = 1.0f;
+                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
-                    PF_Pixel8 dst;
-                    dst.red   = color.red;
-                    dst.green = color.green;
-                    dst.blue  = color.blue;
-                    dst.alpha = PF_MAX_CHAN8;
+                    // Calculate anti-aliased coverage using smoothstep
+                    float strokeCov;
+                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                        strokeCov = 1.0f;
+                    } else {
+                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                    }
+                    if (strokeCov < 0.001f) continue;
+
+                    PF_Pixel8 dst = outData[ox];
+                    float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
+
+                    if (showLineOnly) {
+                        dst.red   = (A_u_char)(color.red * strokeCov);
+                        dst.green = (A_u_char)(color.green * strokeCov);
+                        dst.blue  = (A_u_char)(color.blue * strokeCov);
+                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCov);
+                    } else {
+                        // Proper alpha blending with anti-aliased stroke
+                        float strokeA = strokeCov;
+                        float invStrokeA = 1.0f - strokeA;
+                        float strokeR = color.red / (float)PF_MAX_CHAN8;
+                        float strokeG = color.green / (float)PF_MAX_CHAN8;
+                        float strokeB = color.blue / (float)PF_MAX_CHAN8;
+                        float outA = strokeA + dstAlphaNorm * invStrokeA;
+                        float outR, outG, outB;
+                        if (dstAlphaNorm < 0.001f) {
+                            outR = strokeR * strokeA;
+                            outG = strokeG * strokeA;
+                            outB = strokeB * strokeA;
+                        } else {
+                            float dstR = dst.red / (float)PF_MAX_CHAN8;
+                            float dstG = dst.green / (float)PF_MAX_CHAN8;
+                            float dstB = dst.blue / (float)PF_MAX_CHAN8;
+                            outR = strokeR * strokeA + dstR * invStrokeA;
+                            outG = strokeG * strokeA + dstG * invStrokeA;
+                            outB = strokeB * strokeA + dstB * invStrokeA;
+                        }
+                        dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.green = (A_u_char)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.blue  = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                    }
 
                     outData[ox] = dst;
                 }
@@ -1184,7 +1255,7 @@ Render(
 
     auto strokeSampleCoverage = [&](float sdf) -> float {
         // sdf: + inside, - outside (pixels, boundary at 0)
-        // SIMPLIFIED: Hard edge without anti-aliasing (let AE handle AA)
+        // Use smoothstep for anti-aliasing at stroke edges
         float evalDist;
         if (direction == DIRECTION_INSIDE) {
             if (sdf < 0.0f) return 0.0f; // outside the shape
@@ -1196,8 +1267,16 @@ Render(
             evalDist = fabsf(sdf);
         }
 
-        // Hard edge: 1 if within stroke, 0 otherwise
-        return (evalDist <= strokeThicknessF) ? 1.0f : 0.0f;
+        // Smooth anti-aliasing: full coverage inside, smooth falloff at edge
+        // AA_RANGE defines the width of the anti-aliasing transition (1 pixel)
+        if (evalDist <= strokeThicknessF - AA_RANGE) {
+            return 1.0f; // fully inside stroke
+        } else if (evalDist >= strokeThicknessF + AA_RANGE) {
+            return 0.0f; // fully outside stroke
+        } else {
+            // Smooth transition using smoothstep for high-quality AA
+            return 1.0f - smoothstep(strokeThicknessF - AA_RANGE, strokeThicknessF + AA_RANGE, evalDist);
+        }
     };
 
     if (PF_WORLD_IS_DEEP(output)) {
