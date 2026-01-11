@@ -949,9 +949,10 @@ SmartRender(
             // Only apply near edges (within 1.5px) for efficiency
             if (fabsf(sdf) < 1.5f) {
                 float srcAlpha = getSourceAlpha(fx, fy);
-                // Alpha 0.5 = exactly on edge, deviation from 0.5 indicates subpixel offset
-                // Scale: if alpha is 0.7, edge is ~0.2px inside this pixel
-                float alphaOffset = (srcAlpha - 0.5f) * 0.8f; // 0.8 is a tuning factor
+                // Invert: outer edge should have lighter (more transparent) pixels
+                // When srcAlpha > 0.5 (inside), push SDF inward (subtract)
+                // When srcAlpha < 0.5 (outside), push SDF outward (add)
+                float alphaOffset = (0.5f - srcAlpha) * 0.8f;
                 sdf += alphaOffset;
             }
             
@@ -1329,7 +1330,8 @@ Render(
         // Subpixel edge correction using source alpha
         if (fabsf(sdf) < 1.5f) {
             float srcAlpha = getSourceAlphaRender(fx, fy);
-            float alphaOffset = (srcAlpha - 0.5f) * 0.8f;
+            // Invert: outer edge should have lighter (more transparent) pixels
+            float alphaOffset = (0.5f - srcAlpha) * 0.8f;
             sdf += alphaOffset;
         }
         
