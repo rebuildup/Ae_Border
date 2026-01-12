@@ -1,4 +1,4 @@
-﻿#include "Border.h"
+#include "Border.h"
 #include <vector>
 #include <algorithm>
 #include <cfloat>
@@ -7,6 +7,7 @@
 #include <thread>
 #include <cstdlib>
 #include <cerrno>
+#include <cstdint>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -25,6 +26,20 @@ T CLAMP(T value, T min, T max) {
 inline float smoothstep(float edge0, float edge1, float x) {
     float t = CLAMP((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
+}
+
+// Fast deterministic dither for 8bpc quantization (returns [0,1]).
+// AE's built-in vector renderers often dither when converting from higher precision,
+// which helps avoid visible "flat" plateaus in AA ramps at 8bpc.
+static inline float BorderDither8(A_long x, A_long y) {
+    // 32-bit integer hash (PCG-ish mix), then take the low 8 bits.
+    uint32_t n = (uint32_t)x * 0x1f123bb5u + (uint32_t)y * 0x05491333u + 0x68bc21ebu;
+    n ^= n >> 15;
+    n *= 0x2c1b3c6du;
+    n ^= n >> 12;
+    n *= 0x297a2d39u;
+    n ^= n >> 15;
+    return (float)(n & 0xFFu) / 255.0f;
 }
 
 struct EdgePoint {
@@ -438,10 +453,10 @@ ComputeSignedDistanceField(
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* row0 = (PF_Pixel16*)((char*)input->data + y0 * input->rowbytes);
             PF_Pixel16* row1 = (PF_Pixel16*)((char*)input->data + y1 * input->rowbytes);
-            float a00 = row0[x0].alpha / (float)0x8000;
-            float a10 = row0[x1].alpha / (float)0x8000;
-            float a01 = row1[x0].alpha / (float)0x8000;
-            float a11 = row1[x1].alpha / (float)0x8000;
+            float a00 = row0[x0].alpha / (float)PF_MAX_CHAN16;
+            float a10 = row0[x1].alpha / (float)PF_MAX_CHAN16;
+            float a01 = row1[x0].alpha / (float)PF_MAX_CHAN16;
+            float a11 = row1[x1].alpha / (float)PF_MAX_CHAN16;
             float a0 = a00 + (a10 - a00) * tx;
             float a1 = a01 + (a11 - a01) * tx;
             return a0 + (a1 - a0) * ty;
@@ -674,6 +689,552 @@ ComputeSignedDistanceField(
     }
 
     return PF_Err_NONE;
+}
+
+// Computes signed distance to the *alpha edge* (alpha == threshold) with subpixel precision.
+//
+// Why this exists:
+// - The previous method computed distance to the nearest opposite-class pixel *center*, which creates
+//   "plateaus" (repeated identical coverage/alpha values) along near-horizontal/vertical strokes.
+// - This version:
+//   1) Extracts a 4-neighbor boundary set from the thresholded alpha mask.
+//   2) Runs an exact Euclidean distance transform (EDT) to the nearest boundary pixel.
+//   3) Refines each boundary pixel center into a subpixel edge point by solving alpha(x)=threshold
+//      using a Sobel alpha gradient, then measures distance to that edge point.
+static PF_Err
+ComputeSignedDistanceField_EdgeEDT(
+    PF_EffectWorld* input,
+    A_u_char threshold8,
+    A_u_short threshold16,
+    std::vector<float>& signedDist,
+    A_long width,
+    A_long height)
+{
+    (void)threshold16;
+    const int INF = 1 << 29;
+    const A_long w = width;
+    const A_long h = height;
+
+    signedDist.clear();
+
+    if (w <= 0 || h <= 0) return PF_Err_NONE;
+
+    // Alpha threshold in normalized 0..1 space. Threshold==0 means "auto" (0.5).
+    const float thresholdNorm = (threshold8 == 0) ? 0.5f : (threshold8 / 255.0f);
+
+    // Get alpha at a pixel, bilinear interpolated for subpixel positions (normalized 0..1).
+    auto getAlpha = [&](float fx, float fy) -> float {
+        fx = CLAMP(fx, 0.0f, (float)(w - 1) - 0.001f);
+        fy = CLAMP(fy, 0.0f, (float)(h - 1) - 0.001f);
+
+        int x0 = (int)fx;
+        int y0 = (int)fy;
+        int x1 = MIN(x0 + 1, w - 1);
+        int y1 = MIN(y0 + 1, h - 1);
+        float tx = fx - x0;
+        float ty = fy - y0;
+
+        if (PF_WORLD_IS_DEEP(input)) {
+            PF_Pixel16* row0 = (PF_Pixel16*)((char*)input->data + y0 * input->rowbytes);
+            PF_Pixel16* row1 = (PF_Pixel16*)((char*)input->data + y1 * input->rowbytes);
+            float a00 = row0[x0].alpha / (float)PF_MAX_CHAN16;
+            float a10 = row0[x1].alpha / (float)PF_MAX_CHAN16;
+            float a01 = row1[x0].alpha / (float)PF_MAX_CHAN16;
+            float a11 = row1[x1].alpha / (float)PF_MAX_CHAN16;
+            float a0 = a00 + (a10 - a00) * tx;
+            float a1 = a01 + (a11 - a01) * tx;
+            return a0 + (a1 - a0) * ty;
+        } else {
+            PF_Pixel8* row0 = (PF_Pixel8*)((char*)input->data + y0 * input->rowbytes);
+            PF_Pixel8* row1 = (PF_Pixel8*)((char*)input->data + y1 * input->rowbytes);
+            float a00 = row0[x0].alpha / 255.0f;
+            float a10 = row0[x1].alpha / 255.0f;
+            float a01 = row1[x0].alpha / 255.0f;
+            float a11 = row1[x1].alpha / 255.0f;
+            float a0 = a00 + (a10 - a00) * tx;
+            float a1 = a01 + (a11 - a01) * tx;
+            return a0 + (a1 - a0) * ty;
+        }
+    };
+
+    auto isSolid = [&](A_long x, A_long y) -> bool {
+        float alpha = getAlpha((float)x, (float)y);
+        return alpha > thresholdNorm;
+    };
+
+    // 1D squared EDT (Felzenszwalb & Huttenlocher), with optional nearest-site index output.
+    auto edt1d = [&](const int* f, int n, int* d, int* arg, std::vector<int>& v, std::vector<float>& z) {
+        bool anyFinite = false;
+        for (int i = 0; i < n; ++i) {
+            if (f[i] < INF) { anyFinite = true; break; }
+        }
+        if (!anyFinite) {
+            for (int i = 0; i < n; ++i) {
+                d[i] = INF;
+                if (arg) arg[i] = 0;
+            }
+            return;
+        }
+
+        if ((int)v.size() < n) v.resize(n);
+        if ((int)z.size() < n + 1) z.resize(n + 1);
+
+        const float INF_F = std::numeric_limits<float>::infinity();
+
+        int k = 0;
+        v[0] = 0;
+        z[0] = -INF_F;
+        z[1] = INF_F;
+
+        auto sep = [&](int i, int u)->float {
+            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
+        };
+
+        for (int q = 1; q < n; ++q) {
+            float s = sep(v[k], q);
+            while (k > 0 && s <= z[k]) {
+                --k;
+                s = sep(v[k], q);
+            }
+            ++k;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = INF_F;
+        }
+
+        k = 0;
+        for (int q = 0; q < n; ++q) {
+            while (z[k + 1] < (float)q) ++k;
+            const int site = v[k];
+            const int dx = q - site;
+            d[q] = dx * dx + f[site];
+            if (arg) arg[q] = site;
+        }
+    };
+
+    // Solid + boundary masks.
+    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            solidMask[row + (size_t)x] = isSolid(x, y) ? 1 : 0;
+        }
+    });
+
+    std::vector<A_u_char> edgeMask((size_t)w * (size_t)h, 0);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            const A_u_char s = solidMask[i];
+            bool edge = false;
+            if (x > 0) edge |= (solidMask[i - 1] != s);
+            if (x + 1 < w) edge |= (solidMask[i + 1] != s);
+            if (y > 0) edge |= (solidMask[i - (size_t)w] != s);
+            if (y + 1 < h) edge |= (solidMask[i + (size_t)w] != s);
+            edgeMask[i] = edge ? 1 : 0;
+        }
+    });
+
+    bool anyEdge = false;
+    for (size_t i = 0; i < edgeMask.size(); ++i) {
+        if (edgeMask[i]) { anyEdge = true; break; }
+    }
+    if (!anyEdge) {
+        signedDist.resize((size_t)w * (size_t)h, 0.0f);
+        return PF_Err_NONE;
+    }
+
+    // Subpixel edge points for boundary pixels by solving alpha(x)=threshold along the alpha gradient.
+    std::vector<float> edgeX((size_t)w * (size_t)h, 0.0f);
+    std::vector<float> edgeY((size_t)w * (size_t)h, 0.0f);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            if (!edgeMask[i]) continue;
+
+            const float ax = (float)x;
+            const float ay = (float)y;
+
+            auto a = [&](A_long sx, A_long sy) -> float {
+                sx = CLAMP(sx, (A_long)0, w - 1);
+                sy = CLAMP(sy, (A_long)0, h - 1);
+                return getAlpha((float)sx, (float)sy);
+            };
+
+            // Sobel on alpha (normalized).
+            const float a00 = a(x - 1, y - 1);
+            const float a10 = a(x,     y - 1);
+            const float a20 = a(x + 1, y - 1);
+            const float a01 = a(x - 1, y);
+            const float a21 = a(x + 1, y);
+            const float a02 = a(x - 1, y + 1);
+            const float a12 = a(x,     y + 1);
+            const float a22 = a(x + 1, y + 1);
+
+            const float gradX = (a20 + 2.0f * a21 + a22) - (a00 + 2.0f * a01 + a02);
+            const float gradY = (a02 + 2.0f * a12 + a22) - (a00 + 2.0f * a10 + a20);
+
+            float gx = gradX * (1.0f / 8.0f);
+            float gy = gradY * (1.0f / 8.0f);
+            float gmag = sqrtf(gx * gx + gy * gy);
+
+            // Fallback normal from mask if alpha gradient is too small (flat alpha regions).
+            if (gmag < 1e-5f) {
+                float mx = 0.0f;
+                float my = 0.0f;
+                const A_u_char s = solidMask[i];
+                if (x > 0) mx += (solidMask[i - 1] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (x + 1 < w) mx += (solidMask[i + 1] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (y > 0) my += (solidMask[i - (size_t)w] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (y + 1 < h) my += (solidMask[i + (size_t)w] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                gmag = sqrtf(mx * mx + my * my);
+                if (gmag > 1e-5f) {
+                    gx = mx / gmag;
+                    gy = my / gmag;
+                } else {
+                    gx = 1.0f;
+                    gy = 0.0f;
+                    gmag = 1.0f;
+                }
+            }
+
+            const float nx = gx / gmag;
+            const float ny = gy / gmag;
+            const float alpha0 = getAlpha(ax, ay);
+
+            float t = (thresholdNorm - alpha0) / gmag;
+            t = CLAMP(t, -0.5f, 0.5f);
+
+            edgeX[i] = ax + nx * t;
+            edgeY[i] = ay + ny * t;
+        }
+    });
+
+    // Build 0/INF grid for boundary sites.
+    std::vector<int> fEdge((size_t)w * (size_t)h, INF);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            if (edgeMask[i]) fEdge[i] = 0;
+        }
+    });
+
+    // 2D EDT: first pass over rows.
+    std::vector<int> tmpD((size_t)w * (size_t)h);
+    std::vector<int> tmpArgX((size_t)w * (size_t)h);
+    BorderParallelFor(h, [&](A_long y) {
+        thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
+        thread_local std::vector<float> zBuf;
+        lineIn.resize((size_t)w);
+        lineOut.resize((size_t)w);
+        lineArg.resize((size_t)w);
+
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = fEdge[row + (size_t)x];
+
+        edt1d(lineIn.data(), (int)w, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            tmpD[i] = lineOut[(size_t)x];
+            tmpArgX[i] = lineArg[(size_t)x];
+        }
+    });
+
+    // 2D EDT: second pass over columns, propagating nearest site coordinates.
+    std::vector<int> nearX((size_t)w * (size_t)h);
+    std::vector<int> nearY((size_t)w * (size_t)h);
+    BorderParallelFor(w, [&](A_long x) {
+        thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
+        thread_local std::vector<float> zBuf;
+        lineIn.resize((size_t)h);
+        lineOut.resize((size_t)h);
+        lineArg.resize((size_t)h);
+
+        for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmpD[(size_t)y * (size_t)w + (size_t)x];
+
+        edt1d(lineIn.data(), (int)h, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        for (A_long y = 0; y < h; ++y) {
+            const int sy = lineArg[(size_t)y];
+            const size_t site = (size_t)sy * (size_t)w + (size_t)x;
+            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            nearX[i] = tmpArgX[site];
+            nearY[i] = sy;
+        }
+    });
+
+    signedDist.resize((size_t)w * (size_t)h);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            const bool solid = (solidMask[i] != 0);
+
+            const int sx = nearX[i];
+            const int sy = nearY[i];
+            const size_t si = (size_t)sy * (size_t)w + (size_t)sx;
+
+            float ex = (float)sx;
+            float ey = (float)sy;
+            if (edgeMask[si]) {
+                ex = edgeX[si];
+                ey = edgeY[si];
+            }
+
+            const float dx = (float)x - ex;
+            const float dy = (float)y - ey;
+            const float dist = sqrtf(dx * dx + dy * dy);
+            signedDist[i] = solid ? dist : -dist;
+        }
+    });
+
+    return PF_Err_NONE;
+}
+
+template <typename GetAlphaAtFn>
+static void
+ComputeSignedDistanceField_EdgeEDT_FromAlpha(
+    A_long width,
+    A_long height,
+    float thresholdNorm,
+    GetAlphaAtFn getAlphaAt,
+    std::vector<float>& signedDist)
+{
+    const int INF = 1 << 29;
+    const A_long w = width;
+    const A_long h = height;
+
+    signedDist.clear();
+    if (w <= 0 || h <= 0) return;
+
+    // Clamp + read.
+    auto alphaAt = [&](A_long x, A_long y) -> float {
+        x = CLAMP(x, (A_long)0, w - 1);
+        y = CLAMP(y, (A_long)0, h - 1);
+        return getAlphaAt(x, y);
+    };
+
+    // 1D squared EDT (Felzenszwalb & Huttenlocher), with optional nearest-site index output.
+    auto edt1d = [&](const int* f, int n, int* d, int* arg, std::vector<int>& v, std::vector<float>& z) {
+        bool anyFinite = false;
+        for (int i = 0; i < n; ++i) {
+            if (f[i] < INF) { anyFinite = true; break; }
+        }
+        if (!anyFinite) {
+            for (int i = 0; i < n; ++i) {
+                d[i] = INF;
+                if (arg) arg[i] = 0;
+            }
+            return;
+        }
+
+        if ((int)v.size() < n) v.resize(n);
+        if ((int)z.size() < n + 1) z.resize(n + 1);
+
+        const float INF_F = std::numeric_limits<float>::infinity();
+
+        int k = 0;
+        v[0] = 0;
+        z[0] = -INF_F;
+        z[1] = INF_F;
+
+        auto sep = [&](int i, int u)->float {
+            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
+        };
+
+        for (int q = 1; q < n; ++q) {
+            float s = sep(v[k], q);
+            while (k > 0 && s <= z[k]) {
+                --k;
+                s = sep(v[k], q);
+            }
+            ++k;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = INF_F;
+        }
+
+        k = 0;
+        for (int q = 0; q < n; ++q) {
+            while (z[k + 1] < (float)q) ++k;
+            const int site = v[k];
+            const int dx = q - site;
+            d[q] = dx * dx + f[site];
+            if (arg) arg[q] = site;
+        }
+    };
+
+    // Solid + boundary masks.
+    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const float a = alphaAt(x, y);
+            solidMask[row + (size_t)x] = (a > thresholdNorm) ? 1 : 0;
+        }
+    });
+
+    std::vector<A_u_char> edgeMask((size_t)w * (size_t)h, 0);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            const A_u_char s = solidMask[i];
+            bool edge = false;
+            if (x > 0) edge |= (solidMask[i - 1] != s);
+            if (x + 1 < w) edge |= (solidMask[i + 1] != s);
+            if (y > 0) edge |= (solidMask[i - (size_t)w] != s);
+            if (y + 1 < h) edge |= (solidMask[i + (size_t)w] != s);
+            edgeMask[i] = edge ? 1 : 0;
+        }
+    });
+
+    bool anyEdge = false;
+    for (size_t i = 0; i < edgeMask.size(); ++i) {
+        if (edgeMask[i]) { anyEdge = true; break; }
+    }
+    if (!anyEdge) {
+        signedDist.resize((size_t)w * (size_t)h, 0.0f);
+        return;
+    }
+
+    // Subpixel edge points for boundary pixels by solving alpha(x)=threshold along the alpha gradient.
+    std::vector<float> edgeX((size_t)w * (size_t)h, 0.0f);
+    std::vector<float> edgeY((size_t)w * (size_t)h, 0.0f);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            if (!edgeMask[i]) continue;
+
+            // Sobel on alpha (normalized).
+            const float a00 = alphaAt(x - 1, y - 1);
+            const float a10 = alphaAt(x,     y - 1);
+            const float a20 = alphaAt(x + 1, y - 1);
+            const float a01 = alphaAt(x - 1, y);
+            const float a21 = alphaAt(x + 1, y);
+            const float a02 = alphaAt(x - 1, y + 1);
+            const float a12 = alphaAt(x,     y + 1);
+            const float a22 = alphaAt(x + 1, y + 1);
+
+            const float gradX = (a20 + 2.0f * a21 + a22) - (a00 + 2.0f * a01 + a02);
+            const float gradY = (a02 + 2.0f * a12 + a22) - (a00 + 2.0f * a10 + a20);
+
+            float gx = gradX * (1.0f / 8.0f);
+            float gy = gradY * (1.0f / 8.0f);
+            float gmag = sqrtf(gx * gx + gy * gy);
+
+            // Fallback normal from mask if alpha gradient is too small (flat alpha regions).
+            if (gmag < 1e-5f) {
+                float mx = 0.0f;
+                float my = 0.0f;
+                const A_u_char s = solidMask[i];
+                if (x > 0) mx += (solidMask[i - 1] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (x + 1 < w) mx += (solidMask[i + 1] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (y > 0) my += (solidMask[i - (size_t)w] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                if (y + 1 < h) my += (solidMask[i + (size_t)w] ? 1.0f : 0.0f) - (s ? 1.0f : 0.0f);
+                gmag = sqrtf(mx * mx + my * my);
+                if (gmag > 1e-5f) {
+                    gx = mx / gmag;
+                    gy = my / gmag;
+                } else {
+                    gx = 1.0f;
+                    gy = 0.0f;
+                    gmag = 1.0f;
+                }
+            }
+
+            const float nx = gx / gmag;
+            const float ny = gy / gmag;
+            const float alpha0 = alphaAt(x, y);
+
+            float t = (thresholdNorm - alpha0) / gmag;
+            t = CLAMP(t, -0.5f, 0.5f);
+
+            edgeX[i] = (float)x + nx * t;
+            edgeY[i] = (float)y + ny * t;
+        }
+    });
+
+    // Build 0/INF grid for boundary sites.
+    std::vector<int> fEdge((size_t)w * (size_t)h, INF);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            if (edgeMask[i]) fEdge[i] = 0;
+        }
+    });
+
+    // 2D EDT: first pass over rows.
+    std::vector<int> tmpD((size_t)w * (size_t)h);
+    std::vector<int> tmpArgX((size_t)w * (size_t)h);
+    BorderParallelFor(h, [&](A_long y) {
+        thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
+        thread_local std::vector<float> zBuf;
+        lineIn.resize((size_t)w);
+        lineOut.resize((size_t)w);
+        lineArg.resize((size_t)w);
+
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = fEdge[row + (size_t)x];
+
+        edt1d(lineIn.data(), (int)w, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            tmpD[i] = lineOut[(size_t)x];
+            tmpArgX[i] = lineArg[(size_t)x];
+        }
+    });
+
+    // 2D EDT: second pass over columns, propagating nearest site coordinates.
+    std::vector<int> nearX((size_t)w * (size_t)h);
+    std::vector<int> nearY((size_t)w * (size_t)h);
+    BorderParallelFor(w, [&](A_long x) {
+        thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
+        thread_local std::vector<float> zBuf;
+        lineIn.resize((size_t)h);
+        lineOut.resize((size_t)h);
+        lineArg.resize((size_t)h);
+
+        for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmpD[(size_t)y * (size_t)w + (size_t)x];
+
+        edt1d(lineIn.data(), (int)h, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        for (A_long y = 0; y < h; ++y) {
+            const int sy = lineArg[(size_t)y];
+            const size_t site = (size_t)sy * (size_t)w + (size_t)x;
+            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            nearX[i] = tmpArgX[site];
+            nearY[i] = sy;
+        }
+    });
+
+    signedDist.resize((size_t)w * (size_t)h);
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            const bool solid = (solidMask[i] != 0);
+
+            const int sx = nearX[i];
+            const int sy = nearY[i];
+            const size_t si = (size_t)sy * (size_t)w + (size_t)sx;
+
+            float ex = (float)sx;
+            float ey = (float)sy;
+            if (edgeMask[si]) {
+                ex = edgeX[si];
+                ey = edgeY[si];
+            }
+
+            const float dx = (float)x - ex;
+            const float dy = (float)y - ey;
+            const float dist = sqrtf(dx * dx + dy * dy);
+            signedDist[i] = solid ? dist : -dist;
+        }
+    });
 }
 
 template <typename IsSolidFn>
@@ -930,8 +1491,8 @@ SmartRender(
         std::vector<float> signedDist;
         // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
         A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
-        A_u_short thresholdSdf16 = thresholdSdf8 * 257;
-        ERR(ComputeSignedDistanceField(input, thresholdSdf8, thresholdSdf16, signedDist,
+        A_u_short thresholdSdf16 = (A_u_short)(thresholdSdf8 * (PF_MAX_CHAN16 / 255.0f) + 0.5f);
+        ERR(ComputeSignedDistanceField_EdgeEDT(input, thresholdSdf8, thresholdSdf16, signedDist,
             input->width, input->height));
 
         // STEP 1 & 2: Clear output and optionally copy source (optimized with memset/memcpy)
@@ -1072,10 +1633,6 @@ SmartRender(
             float d0 = d00 + (d10 - d00) * hx;
             float d1 = d01 + (d11 - d01) * hx;
             float sdf = d0 + (d1 - d0) * hy;
-            
-            // Apply 0.5px boundary correction
-            if (sdf > 0.0f) sdf -= 0.5f;
-            else if (sdf < 0.0f) sdf += 0.5f;
             
             return sdf;
         };
@@ -1235,6 +1792,10 @@ SmartRender(
                     float strokeCov = totalCoverage * 0.25f;
                     if (strokeCov < 0.001f) continue;
 
+                    // Dither coverage before 8bpc quantization to avoid visible plateaus.
+                    float strokeA = strokeCov;
+                    strokeA = CLAMP(strokeA + (BorderDither8(ox, oy) - 0.5f) / 255.0f, 0.0f, 1.0f);
+
                     PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
@@ -1243,10 +1804,9 @@ SmartRender(
                         dst.red   = color.red;
                         dst.green = color.green;
                         dst.blue  = color.blue;
-                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCov + 0.5f);
+                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeA + 0.5f);
                     } else {
                         // Straight alpha compositing (Porter-Duff over)
-                        float strokeA = strokeCov;
                         float invStrokeA = 1.0f - strokeA;
                         float strokeR = color.red / (float)PF_MAX_CHAN8;
                         float strokeG = color.green / (float)PF_MAX_CHAN8;
@@ -1336,7 +1896,7 @@ Render(
 
     // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
     const A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
-    const A_u_short thresholdSdf16 = thresholdSdf8 * 257;
+    const A_u_short thresholdSdf16 = (A_u_short)(thresholdSdf8 * (PF_MAX_CHAN16 / 255.0f) + 0.5f);
 
     // Output base: either fully transparent (line-only) or input copied into expanded output
     // with only the non-overlapping bands cleared.
@@ -1422,30 +1982,14 @@ Render(
     const A_long roiH = roiBottom - roiTop + 1;
     (void)roiH;
 
-    auto isSolidRoi = [&](A_long lx, A_long ly) -> bool {
+    const float thresholdNorm = thresholdSdf8 / 255.0f;
+    auto getAlphaRoi = [&](A_long lx, A_long ly) -> float {
         const A_long gx = roiLeft + lx;
         const A_long gy = roiTop + ly;
         const A_long ix = gx - originX;
         const A_long iy = gy - originY;
-        if (ix < 0 || ix >= inW || iy < 0 || iy >= inH) return false;
-        if (PF_WORLD_IS_DEEP(input)) {
-            PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes) + ix;
-            return p->alpha > thresholdSdf16;
-        } else {
-            PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + iy * input->rowbytes) + ix;
-            return p->alpha > thresholdSdf8;
-        }
-    };
-
-    std::vector<int> signedDist;
-    ComputeSignedDistanceFieldFromSolid(roiW, roiH, isSolidRoi, signedDist);
-
-    // Get source alpha at position for subpixel edge correction
-    auto getSourceAlphaRender = [&](float fx, float fy) -> float {
-        int ix = (int)fx - originX;
-        int iy = (int)fy - originY;
         if (ix < 0 || ix >= inW || iy < 0 || iy >= inH) return 0.0f;
-        
+
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + iy * input->rowbytes) + ix;
             return p->alpha / (float)PF_MAX_CHAN16;
@@ -1454,6 +1998,9 @@ Render(
             return p->alpha / 255.0f;
         }
     };
+
+    std::vector<float> signedDist;
+    ComputeSignedDistanceField_EdgeEDT_FromAlpha(roiW, roiH, thresholdNorm, getAlphaRoi, signedDist);
 
     // Hermite SDF lookup for smooth anti-aliasing
     auto sampleSDF = [&](float fx, float fy) -> float {
@@ -1472,21 +2019,15 @@ Render(
         float sx = smoothstep(0.0f, 1.0f, tx);
         float sy = smoothstep(0.0f, 1.0f, ty);
 
-        int d00 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x0];
-        int d10 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x1];
-        int d01 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x0];
-        int d11 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x1];
+        float d00 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x0];
+        float d10 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x1];
+        float d01 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x0];
+        float d11 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x1];
 
         // Hermite interpolation using smoothstep weights
         float d0 = d00 + (d10 - d00) * sx;
         float d1 = d01 + (d11 - d01) * sx;
-        float d = d0 + (d1 - d0) * sy;
-
-        float sdf = d * 0.1f;
-        if (sdf > 0.0f) sdf -= 0.5f;
-        else if (sdf < 0.0f) sdf += 0.5f;
-        
-        return sdf;
+        return d0 + (d1 - d0) * sy;
     };
 
     auto strokeSampleCoverage = [&](float sdf) -> float {
@@ -1588,6 +2129,10 @@ Render(
                 float strokeCoverage = strokeSampleCoverage(sdfC);
                 if (strokeCoverage < 0.001f) continue;
 
+                // Dither coverage before 8bpc quantization to avoid visible plateaus.
+                float strokeA = strokeCoverage;
+                strokeA = CLAMP(strokeA + (BorderDither8(ox, oy) - 0.5f) / 255.0f, 0.0f, 1.0f);
+
                 PF_Pixel8 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
 
@@ -1596,10 +2141,9 @@ Render(
                     dst.red = color.red;
                     dst.green = color.green;
                     dst.blue = color.blue;
-                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeCoverage + 0.5f);
+                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeA + 0.5f);
                 } else {
                     // Straight alpha compositing (Porter-Duff over)
-                    float strokeA = strokeCoverage;
                     float invStrokeA = 1.0f - strokeA;
 
                     float strokeR = color.red / (float)PF_MAX_CHAN8;
