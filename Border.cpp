@@ -413,7 +413,7 @@ ComputeSignedDistanceField(
     PF_EffectWorld* input,
     A_u_char threshold8,
     A_u_short threshold16,
-    std::vector<int>& signedDist, // scaled by 10
+    std::vector<float>& signedDist, // float precision
     A_long width,
     A_long height)
 {
@@ -627,15 +627,15 @@ ComputeSignedDistanceField(
                 }
             }
             
-            const int sd = (int)floorf(dist * 10.0f + 0.5f);
-            signedDist[i] = solid ? sd : -sd;
+            // Store as float for full precision
+            signedDist[i] = solid ? dist : -dist;
         }
     });
     
     // Apply Gaussian blur to SDF for smoother edges
     // This smooths out pixel-level stepping in the distance field
     {
-        std::vector<int> blurred((size_t)w * (size_t)h);
+        std::vector<float> blurred((size_t)w * (size_t)h);
         
         // 3x3 Gaussian kernel (sigma ≈ 0.85)
         // [1 2 1]
@@ -655,18 +655,18 @@ ComputeSignedDistanceField(
                 int y2 = MIN(y + 1, h - 1);
                 
                 // Sample 3x3 neighborhood
-                int sum = 0;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x0] * 1;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x1] * 2;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x2] * 1;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x0] * 2;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x1] * 4;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x2] * 2;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x0] * 1;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x1] * 2;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x2] * 1;
+                float sum = 0.0f;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x0] * 1.0f;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x1] * 2.0f;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x2] * 1.0f;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x0] * 2.0f;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x1] * 4.0f;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x2] * 2.0f;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x0] * 1.0f;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x1] * 2.0f;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x2] * 1.0f;
                 
-                blurred[i] = sum / 16;
+                blurred[i] = sum / 16.0f;
             }
         });
         
@@ -927,7 +927,7 @@ SmartRender(
         A_long offsetY = input->origin_y - output->origin_y;
 
         // Generate signed distance field (fast chamfer, scaled by 10)
-        std::vector<int> signedDist;
+        std::vector<float> signedDist;
         // Treat Threshold==0 as "auto" and use 50% alpha to match the perceived AA edge.
         A_u_char thresholdSdf8 = (threshold == 0) ? 128 : threshold;
         A_u_short thresholdSdf16 = thresholdSdf8 * 257;
@@ -1007,7 +1007,7 @@ SmartRender(
         }
 
         // SDF data pointer
-        const int* sdfData = signedDist.data();
+        const float* sdfData = signedDist.data();
 
         // Get source alpha at subpixel position (bilinear interpolated)
         auto getSourceAlpha = [&](float fx, float fy) -> float {
@@ -1062,10 +1062,11 @@ SmartRender(
             float hy = smoothstep(0.0f, 1.0f, ty);
             
             // Sample 4 corners
-            float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0] * 0.1f;
-            float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1] * 0.1f;
-            float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0] * 0.1f;
-            float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1] * 0.1f;
+            // SDF is now stored as float, no need to scale
+            float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0];
+            float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1];
+            float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0];
+            float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1];
             
             // Hermite interpolation using smoothstep weights
             float d0 = d00 + (d10 - d00) * hx;
