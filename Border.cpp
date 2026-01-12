@@ -953,8 +953,9 @@ SmartRender(
             return sdf;
         };
 
-        // AA range of 1.0px for smoother edges
-        const float AA_RANGE_SM = 1.0f;
+        // Adaptive AA range: wider for thin strokes, narrower for thick strokes
+        // Thin strokes need more AA to hide pixel stepping
+        const float AA_RANGE_SM = (strokeThicknessF < 4.0f) ? 1.5f : 1.0f;
 
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
@@ -1281,7 +1282,8 @@ Render(
         return err;
     }
 
-    const float AA_RANGE = 1.0f;
+    // Adaptive AA range: wider for thin strokes to hide pixel stepping
+    const float AA_RANGE = (strokeThicknessF < 4.0f) ? 1.5f : 1.0f;
     const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     // Compute a tight ROI for the SDF / stroke evaluation.
