@@ -974,64 +974,46 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // First, get the center SDF value
-                    float sdfCenter = getSDF_Hermite(fx, fy);
+                    // Get SDF at pixel center
+                    float sdfC = getSDF_Hermite(fx, fy);
                     
-                    // Calculate SDF gradient (normal direction of the edge)
-                    float gradX = getSDF_Hermite(MIN(fx + 0.5f, (float)(inW - 1)), fy) - 
-                                  getSDF_Hermite(MAX(fx - 0.5f, 0.0f), fy);
-                    float gradY = getSDF_Hermite(fx, MIN(fy + 0.5f, (float)(inH - 1))) - 
-                                  getSDF_Hermite(fx, MAX(fy - 0.5f, 0.0f));
-                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    // Alpha-based SDF correction for subpixel edge precision
+                    // This uses the original image's anti-aliasing to refine edge position
+                    float srcAlpha = getSourceAlpha(fx, fy);
                     
-                    // Normalize gradient to get edge normal direction
-                    float nx = 0.0f, ny = 0.0f;
-                    if (gradMag > 0.001f) {
-                        nx = gradX / gradMag;
-                        ny = gradY / gradMag;
+                    // Near edges (where alpha is not 0 or 1), use alpha to estimate subpixel position
+                    // Alpha = 0.5 means exactly on edge, alpha > 0.5 means inside, alpha < 0.5 means outside
+                    if (srcAlpha > 0.01f && srcAlpha < 0.99f) {
+                        // Convert alpha to signed distance offset (-0.5 to +0.5 pixels)
+                        // This maps: alpha=0 → -0.5, alpha=0.5 → 0, alpha=1 → +0.5
+                        float alphaOffset = (srcAlpha - 0.5f);
+                        
+                        // Only apply correction near the boundary (where SDF is close to 0)
+                        if (fabsf(sdfC) < 1.5f) {
+                            sdfC += alphaOffset;
+                        }
                     }
                     
-                    // Sample along the gradient direction (edge normal) only
-                    // This matches how shape layers do AA - only perpendicular to edge
-                    float totalCoverage = 0.0f;
-                    int validSamples = 0;
+                    float evalDist;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < 0.0f) continue;
+                        evalDist = sdfC;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > 0.0f) continue;
+                        evalDist = -sdfC;
+                    } else {
+                        evalDist = fabsf(sdfC);
+                    }
                     
-                    // 4 samples along the gradient direction
-                    const float sampleOffsets[4] = {-0.375f, -0.125f, 0.125f, 0.375f};
-                    
-                    for (int s = 0; s < 4; ++s) {
-                        float sx = fx + nx * sampleOffsets[s];
-                        float sy = fy + ny * sampleOffsets[s];
-                        
-                        if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
-                        
-                        float sdfC = getSDF_Hermite(sx, sy);
-                        float evalDist;
-                        if (direction == DIRECTION_INSIDE) {
-                            if (sdfC < 0.0f) continue;
-                            evalDist = sdfC;
-                        } else if (direction == DIRECTION_OUTSIDE) {
-                            if (sdfC > 0.0f) continue;
-                            evalDist = -sdfC;
-                        } else {
-                            evalDist = fabsf(sdfC);
-                        }
-                        
-                        if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
-                        // Calculate coverage using smoothstep
-                        float sampleCov;
-                        if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                            sampleCov = 1.0f;
-                        } else {
-                            sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                        }
-                        totalCoverage += sampleCov;
-                        validSamples++;
+                    // Calculate coverage using smoothstep
+                    float strokeCov;
+                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                        strokeCov = 1.0f;
+                    } else {
+                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
                     }
-                    
-                    if (validSamples == 0) continue;
-                    float strokeCov = totalCoverage / (float)validSamples;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
@@ -1088,64 +1070,39 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // First, get the center SDF value
-                    float sdfCenter = getSDF_Hermite(fx, fy);
+                    // Get SDF at pixel center
+                    float sdfC = getSDF_Hermite(fx, fy);
                     
-                    // Calculate SDF gradient (normal direction of the edge)
-                    float gradX = getSDF_Hermite(MIN(fx + 0.5f, (float)(inW - 1)), fy) - 
-                                  getSDF_Hermite(MAX(fx - 0.5f, 0.0f), fy);
-                    float gradY = getSDF_Hermite(fx, MIN(fy + 0.5f, (float)(inH - 1))) - 
-                                  getSDF_Hermite(fx, MAX(fy - 0.5f, 0.0f));
-                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    // Alpha-based SDF correction for subpixel edge precision
+                    float srcAlpha = getSourceAlpha(fx, fy);
                     
-                    // Normalize gradient to get edge normal direction
-                    float nx = 0.0f, ny = 0.0f;
-                    if (gradMag > 0.001f) {
-                        nx = gradX / gradMag;
-                        ny = gradY / gradMag;
+                    if (srcAlpha > 0.01f && srcAlpha < 0.99f) {
+                        float alphaOffset = (srcAlpha - 0.5f);
+                        if (fabsf(sdfC) < 1.5f) {
+                            sdfC += alphaOffset;
+                        }
                     }
                     
-                    // Sample along the gradient direction (edge normal) only
-                    // This matches how shape layers do AA - only perpendicular to edge
-                    float totalCoverage = 0.0f;
-                    int validSamples = 0;
+                    float evalDist;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < 0.0f) continue;
+                        evalDist = sdfC;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > 0.0f) continue;
+                        evalDist = -sdfC;
+                    } else {
+                        evalDist = fabsf(sdfC);
+                    }
                     
-                    // 4 samples along the gradient direction
-                    const float sampleOffsets[4] = {-0.375f, -0.125f, 0.125f, 0.375f};
-                    
-                    for (int s = 0; s < 4; ++s) {
-                        float sx = fx + nx * sampleOffsets[s];
-                        float sy = fy + ny * sampleOffsets[s];
-                        
-                        if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
-                        
-                        float sdfC = getSDF_Hermite(sx, sy);
-                        float evalDist;
-                        if (direction == DIRECTION_INSIDE) {
-                            if (sdfC < 0.0f) continue;
-                            evalDist = sdfC;
-                        } else if (direction == DIRECTION_OUTSIDE) {
-                            if (sdfC > 0.0f) continue;
-                            evalDist = -sdfC;
-                        } else {
-                            evalDist = fabsf(sdfC);
-                        }
-                        
-                        if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
-                        // Calculate coverage using smoothstep
-                        float sampleCov;
-                        if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                            sampleCov = 1.0f;
-                        } else {
-                            sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                        }
-                        totalCoverage += sampleCov;
-                        validSamples++;
+                    // Calculate coverage using smoothstep
+                    float strokeCov;
+                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                        strokeCov = 1.0f;
+                    } else {
+                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
                     }
-                    
-                    if (validSamples == 0) continue;
-                    float strokeCov = totalCoverage / (float)validSamples;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel8 dst = outData[ox];
