@@ -418,19 +418,57 @@ ComputeSignedDistanceField(
     A_long height)
 {
     const int INF = 1 << 29;
-    const A_long w = width;
-    const A_long h = height;
+    
+    // Compute SDF at 2x resolution for subpixel accuracy
+    const A_long w = width * 2;
+    const A_long h = height * 2;
 
     signedDist.clear();
 
-    auto isSolid = [&](A_long x, A_long y)->bool {
+    // Bilinear interpolated alpha sampling at 2x resolution
+    auto getAlpha = [&](float fx, float fy) -> float {
+        // Convert 2x coordinates to original coordinates
+        float ox = fx * 0.5f;
+        float oy = fy * 0.5f;
+        
+        // Clamp to valid range
+        ox = CLAMP(ox, 0.0f, (float)(width - 1) - 0.001f);
+        oy = CLAMP(oy, 0.0f, (float)(height - 1) - 0.001f);
+        
+        int x0 = (int)ox;
+        int y0 = (int)oy;
+        int x1 = MIN(x0 + 1, width - 1);
+        int y1 = MIN(y0 + 1, height - 1);
+        float tx = ox - x0;
+        float ty = oy - y0;
+        
         if (PF_WORLD_IS_DEEP(input)) {
-            PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha > threshold16;
+            PF_Pixel16* row0 = (PF_Pixel16*)((char*)input->data + y0 * input->rowbytes);
+            PF_Pixel16* row1 = (PF_Pixel16*)((char*)input->data + y1 * input->rowbytes);
+            float a00 = row0[x0].alpha / (float)0x8000;
+            float a10 = row0[x1].alpha / (float)0x8000;
+            float a01 = row1[x0].alpha / (float)0x8000;
+            float a11 = row1[x1].alpha / (float)0x8000;
+            float a0 = a00 + (a10 - a00) * tx;
+            float a1 = a01 + (a11 - a01) * tx;
+            return a0 + (a1 - a0) * ty;
         } else {
-            PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
-            return p->alpha > threshold8;
+            PF_Pixel8* row0 = (PF_Pixel8*)((char*)input->data + y0 * input->rowbytes);
+            PF_Pixel8* row1 = (PF_Pixel8*)((char*)input->data + y1 * input->rowbytes);
+            float a00 = row0[x0].alpha / 255.0f;
+            float a10 = row0[x1].alpha / 255.0f;
+            float a01 = row1[x0].alpha / 255.0f;
+            float a11 = row1[x1].alpha / 255.0f;
+            float a0 = a00 + (a10 - a00) * tx;
+            float a1 = a01 + (a11 - a01) * tx;
+            return a0 + (a1 - a0) * ty;
         }
+    };
+    
+    // Use 0.5 threshold for antialiased edges
+    auto isSolid = [&](A_long x, A_long y) -> bool {
+        float alpha = getAlpha((float)x, (float)y);
+        return alpha > 0.5f;
     };
 
     // 1D squared EDT (Felzenszwalb & Huttenlocher).
@@ -981,33 +1019,43 @@ SmartRender(
         };
 
         // Hermite interpolated SDF lookup for smooth anti-aliasing
-        // Uses smoothstep for smoother gradients than bilinear interpolation
+        // SDF is computed at 2x resolution, so we scale coordinates accordingly
+        const A_long sdfW = inW * 2;
+        const A_long sdfH = inH * 2;
+        
         auto getSDF_Hermite = [=](float fx, float fy) -> float {
-            // Clamp to valid range
-            fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
-            fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
+            // Scale to 2x resolution
+            float sx2 = fx * 2.0f;
+            float sy2 = fy * 2.0f;
             
-            int x0 = (int)fx;
-            int y0 = (int)fy;
-            int x1 = MIN(x0 + 1, inW - 1);
-            int y1 = MIN(y0 + 1, inH - 1);
-            float tx = fx - x0;
-            float ty = fy - y0;
+            // Clamp to valid range
+            sx2 = CLAMP(sx2, 0.0f, (float)(sdfW - 1) - 0.001f);
+            sy2 = CLAMP(sy2, 0.0f, (float)(sdfH - 1) - 0.001f);
+            
+            int x0 = (int)sx2;
+            int y0 = (int)sy2;
+            int x1 = MIN(x0 + 1, sdfW - 1);
+            int y1 = MIN(y0 + 1, sdfH - 1);
+            float tx = sx2 - x0;
+            float ty = sy2 - y0;
             
             // Apply smoothstep for Hermite interpolation (smoother than linear)
-            float sx = smoothstep(0.0f, 1.0f, tx);
-            float sy = smoothstep(0.0f, 1.0f, ty);
+            float hx = smoothstep(0.0f, 1.0f, tx);
+            float hy = smoothstep(0.0f, 1.0f, ty);
             
-            // Sample 4 corners
-            float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0] * 0.1f;
-            float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1] * 0.1f;
-            float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0] * 0.1f;
-            float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1] * 0.1f;
+            // Sample 4 corners from 2x resolution SDF
+            float d00 = sdfData[(size_t)y0 * (size_t)sdfW + (size_t)x0] * 0.1f;
+            float d10 = sdfData[(size_t)y0 * (size_t)sdfW + (size_t)x1] * 0.1f;
+            float d01 = sdfData[(size_t)y1 * (size_t)sdfW + (size_t)x0] * 0.1f;
+            float d11 = sdfData[(size_t)y1 * (size_t)sdfW + (size_t)x1] * 0.1f;
             
             // Hermite interpolation using smoothstep weights
-            float d0 = d00 + (d10 - d00) * sx;
-            float d1 = d01 + (d11 - d01) * sx;
-            float sdf = d0 + (d1 - d0) * sy;
+            float d0 = d00 + (d10 - d00) * hx;
+            float d1 = d01 + (d11 - d01) * hx;
+            float sdf = d0 + (d1 - d0) * hy;
+            
+            // Scale back to original resolution (divide by 2)
+            sdf *= 0.5f;
             
             // Apply 0.5px boundary correction
             if (sdf > 0.0f) sdf -= 0.5f;
