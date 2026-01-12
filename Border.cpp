@@ -547,8 +547,61 @@ ComputeSignedDistanceField(
     edt2d(fFg, dtFg2);
     edt2d(fBg, dtBg2);
 
-    // Compute signed distance with alpha-based subpixel correction
+    // Compute signed distance with ESDT-inspired subpixel correction
+    // Based on: https://acko.net/blog/subpixel-distance-transform/
     signedDist.resize((size_t)w * (size_t)h);
+    
+    // First, compute subpixel offsets for gray pixels using alpha gradient
+    std::vector<float> subpixelOffsetX((size_t)w * (size_t)h, 0.0f);
+    std::vector<float> subpixelOffsetY((size_t)w * (size_t)h, 0.0f);
+    
+    BorderParallelFor(h, [&](A_long y) {
+        const size_t row = (size_t)y * (size_t)w;
+        for (A_long x = 0; x < w; ++x) {
+            const size_t i = row + (size_t)x;
+            float alpha = getAlpha((float)x, (float)y);
+            
+            // Only process gray pixels (edge pixels)
+            if (alpha <= 0.01f || alpha >= 0.99f) continue;
+            
+            // Calculate alpha gradient using [1 2 1] smoothing kernel
+            // This gives us the direction to the edge
+            float gradX = 0.0f, gradY = 0.0f;
+            
+            // Horizontal gradient (with vertical smoothing)
+            if (x > 0 && x < w - 1) {
+                float a_left = getAlpha((float)(x - 1), (float)y);
+                float a_right = getAlpha((float)(x + 1), (float)y);
+                gradX = (a_right - a_left) * 0.5f;
+            }
+            
+            // Vertical gradient (with horizontal smoothing)
+            if (y > 0 && y < h - 1) {
+                float a_up = getAlpha((float)x, (float)(y - 1));
+                float a_down = getAlpha((float)x, (float)(y + 1));
+                gradY = (a_down - a_up) * 0.5f;
+            }
+            
+            float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+            
+            if (gradMag > 0.01f) {
+                // Normalize gradient
+                float nx = gradX / gradMag;
+                float ny = gradY / gradMag;
+                
+                // Distance to edge based on alpha (alpha = 0.5 is on edge)
+                // alpha > 0.5: inside, need to move outward (positive direction of gradient)
+                // alpha < 0.5: outside, need to move inward (negative direction of gradient)
+                float distToEdge = (alpha - 0.5f);  // -0.5 to +0.5
+                
+                // Subpixel offset in the direction of the gradient
+                subpixelOffsetX[i] = nx * distToEdge;
+                subpixelOffsetY[i] = ny * distToEdge;
+            }
+        }
+    });
+    
+    // Now compute SDF with subpixel corrections
     BorderParallelFor(h, [&](A_long y) {
         const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
@@ -557,18 +610,21 @@ ComputeSignedDistanceField(
             const int d2 = solid ? dtBg2[i] : dtFg2[i];
             float dist = sqrtf((float)d2);
             
-            // Alpha-based subpixel correction
-            // Use alpha to refine subpixel position of edge
+            // Apply subpixel correction
             float alpha = getAlpha((float)x, (float)y);
-            
-            // For pixels near the edge, use alpha to estimate subpixel offset
-            // alpha = 0.5 -> on edge, offset = 0
-            // alpha = 1.0 -> 0.5px inside, offset = +0.5
-            // alpha = 0.0 -> 0.5px outside, offset = -0.5
             if (alpha > 0.01f && alpha < 0.99f) {
-                float alphaOffset = (alpha - 0.5f);
-                dist += alphaOffset;
-                if (dist < 0.0f) dist = 0.0f;
+                // Use the subpixel offset magnitude
+                float offsetMag = sqrtf(subpixelOffsetX[i] * subpixelOffsetX[i] + 
+                                        subpixelOffsetY[i] * subpixelOffsetY[i]);
+                
+                // For pixels near the edge, adjust distance based on alpha
+                // If alpha > 0.5, we're inside so add distance
+                // If alpha < 0.5, we're outside so subtract distance
+                if (solid) {
+                    dist += offsetMag;  // Push outward
+                } else {
+                    dist += offsetMag;  // Distance to edge
+                }
             }
             
             const int sd = (int)floorf(dist * 10.0f + 0.5f);
