@@ -1100,37 +1100,49 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center
-                    float sdfC = getSDF_Hermite(fx, fy);
+                    // 4x Supersampling (2x2 grid) for shape layer-like AA
+                    // This ensures neighboring pixels have different coverage values
+                    float totalCoverage = 0.0f;
                     
-                    // Calculate SDF gradient (equivalent to ddx/ddy in shaders)
-                    // This gives us the rate of change of SDF per pixel
-                    float gradX = getSDF_Hermite(fx + 0.5f, fy) - getSDF_Hermite(fx - 0.5f, fy);
-                    float gradY = getSDF_Hermite(fx, fy + 0.5f) - getSDF_Hermite(fx, fy - 0.5f);
-                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
-                    
-                    // Prevent division by zero
-                    if (gradMag < 0.001f) gradMag = 0.001f;
-                    
-                    // Evaluate distance based on direction
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
+                    // 2x2 subpixel grid with offsets: -0.25, +0.25
+                    for (int sy = 0; sy < 2; ++sy) {
+                        for (int sx = 0; sx < 2; ++sx) {
+                            float subX = fx + (sx - 0.5f) * 0.5f;
+                            float subY = fy + (sy - 0.5f) * 0.5f;
+                            
+                            // Get SDF at subpixel position
+                            float sdfC = getSDF_Hermite(subX, subY);
+                            
+                            // Evaluate distance based on direction
+                            float evalDist;
+                            if (direction == DIRECTION_INSIDE) {
+                                if (sdfC < 0.0f) continue;
+                                evalDist = sdfC;
+                            } else if (direction == DIRECTION_OUTSIDE) {
+                                if (sdfC > 0.0f) continue;
+                                evalDist = -sdfC;
+                            } else {
+                                evalDist = fabsf(sdfC);
+                            }
+                            
+                            // Calculate gradient at subpixel position
+                            float gradX = getSDF_Hermite(subX + 0.25f, subY) - getSDF_Hermite(subX - 0.25f, subY);
+                            float gradY = getSDF_Hermite(subX, subY + 0.25f) - getSDF_Hermite(subX, subY - 0.25f);
+                            float gradMag = sqrtf(gradX * gradX + gradY * gradY) * 2.0f;  // Scale back to per-pixel
+                            if (gradMag < 0.001f) gradMag = 0.001f;
+                            
+                            // Distance to stroke edge in pixels
+                            float distToEdge = (evalDist - strokeThicknessF) / gradMag;
+                            
+                            // Coverage for this subpixel
+                            float subCov = 0.5f - distToEdge;
+                            subCov = CLAMP(subCov, 0.0f, 1.0f);
+                            totalCoverage += subCov;
+                        }
                     }
                     
-                    // Convert to pixel distance using gradient magnitude
-                    // This makes AA adapt to edge angle automatically
-                    float pixelDist = (evalDist - strokeThicknessF) / gradMag;
-                    
-                    // Calculate coverage: 0.5 - pixelDist gives us smooth AA
-                    // saturate clamps to [0, 1]
-                    float strokeCov = CLAMP(0.5f - pixelDist, 0.0f, 1.0f);
+                    // Average coverage from 4 subpixels
+                    float strokeCov = totalCoverage * 0.25f;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
@@ -1187,32 +1199,39 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center
-                    float sdfC = getSDF_Hermite(fx, fy);
+                    // 4x Supersampling (2x2 grid) for shape layer-like AA
+                    float totalCoverage = 0.0f;
                     
-                    // Calculate SDF gradient (equivalent to ddx/ddy in shaders)
-                    float gradX = getSDF_Hermite(fx + 0.5f, fy) - getSDF_Hermite(fx - 0.5f, fy);
-                    float gradY = getSDF_Hermite(fx, fy + 0.5f) - getSDF_Hermite(fx, fy - 0.5f);
-                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
-                    
-                    if (gradMag < 0.001f) gradMag = 0.001f;
-                    
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
+                    for (int sy = 0; sy < 2; ++sy) {
+                        for (int sx = 0; sx < 2; ++sx) {
+                            float subX = fx + (sx - 0.5f) * 0.5f;
+                            float subY = fy + (sy - 0.5f) * 0.5f;
+                            
+                            float sdfC = getSDF_Hermite(subX, subY);
+                            
+                            float evalDist;
+                            if (direction == DIRECTION_INSIDE) {
+                                if (sdfC < 0.0f) continue;
+                                evalDist = sdfC;
+                            } else if (direction == DIRECTION_OUTSIDE) {
+                                if (sdfC > 0.0f) continue;
+                                evalDist = -sdfC;
+                            } else {
+                                evalDist = fabsf(sdfC);
+                            }
+                            
+                            float gradX = getSDF_Hermite(subX + 0.25f, subY) - getSDF_Hermite(subX - 0.25f, subY);
+                            float gradY = getSDF_Hermite(subX, subY + 0.25f) - getSDF_Hermite(subX, subY - 0.25f);
+                            float gradMag = sqrtf(gradX * gradX + gradY * gradY) * 2.0f;
+                            if (gradMag < 0.001f) gradMag = 0.001f;
+                            
+                            float distToEdge = (evalDist - strokeThicknessF) / gradMag;
+                            float subCov = CLAMP(0.5f - distToEdge, 0.0f, 1.0f);
+                            totalCoverage += subCov;
+                        }
                     }
                     
-                    // Convert to pixel distance using gradient magnitude
-                    float pixelDist = (evalDist - strokeThicknessF) / gradMag;
-                    
-                    // Calculate coverage
-                    float strokeCov = CLAMP(0.5f - pixelDist, 0.0f, 1.0f);
+                    float strokeCov = totalCoverage * 0.25f;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel8 dst = outData[ox];
