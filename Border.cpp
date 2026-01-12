@@ -1037,29 +1037,52 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center (alpha-based correction already applied in SDF computation)
-                    float sdfC = getSDF_Hermite(fx, fy);
+                    // 16-sample MSAA for accurate coverage estimation
+                    // 4x4 grid pattern for even coverage across the pixel
+                    float totalCoverage = 0.0f;
+                    int validSamples = 0;
                     
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
-                    }
-                    
-                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+                    for (int sy = 0; sy < 4; ++sy) {
+                        for (int sx = 0; sx < 4; ++sx) {
+                            // Offset within pixel: -0.375, -0.125, 0.125, 0.375
+                            float ox = (sx - 1.5f) * 0.25f;
+                            float oy = (sy - 1.5f) * 0.25f;
+                            
+                            float sampleX = fx + ox;
+                            float sampleY = fy + oy;
+                            
+                            if (sampleX < 0.0f || sampleX >= (float)(inW - 1) || 
+                                sampleY < 0.0f || sampleY >= (float)(inH - 1)) continue;
+                            
+                            float sdfC = getSDF_Hermite(sampleX, sampleY);
+                            
+                            float evalDist;
+                            if (direction == DIRECTION_INSIDE) {
+                                if (sdfC < 0.0f) continue;
+                                evalDist = sdfC;
+                            } else if (direction == DIRECTION_OUTSIDE) {
+                                if (sdfC > 0.0f) continue;
+                                evalDist = -sdfC;
+                            } else {
+                                evalDist = fabsf(sdfC);
+                            }
+                            
+                            if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
-                    // Calculate coverage using smoothstep
-                    float strokeCov;
-                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                        strokeCov = 1.0f;
-                    } else {
-                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                            // Calculate coverage for this sample
+                            float sampleCov;
+                            if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                                sampleCov = 1.0f;
+                            } else {
+                                sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                            }
+                            totalCoverage += sampleCov;
+                            validSamples++;
+                        }
                     }
+                    
+                    if (validSamples == 0) continue;
+                    float strokeCov = totalCoverage / 16.0f;  // Always divide by 16 for consistent coverage
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
@@ -1116,29 +1139,49 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center (alpha-based correction already applied in SDF computation)
-                    float sdfC = getSDF_Hermite(fx, fy);
+                    // 16-sample MSAA for accurate coverage estimation
+                    float totalCoverage = 0.0f;
+                    int validSamples = 0;
                     
-                    float evalDist;
-                    if (direction == DIRECTION_INSIDE) {
-                        if (sdfC < 0.0f) continue;
-                        evalDist = sdfC;
-                    } else if (direction == DIRECTION_OUTSIDE) {
-                        if (sdfC > 0.0f) continue;
-                        evalDist = -sdfC;
-                    } else {
-                        evalDist = fabsf(sdfC);
-                    }
-                    
-                    if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
+                    for (int sy = 0; sy < 4; ++sy) {
+                        for (int sx = 0; sx < 4; ++sx) {
+                            float ox = (sx - 1.5f) * 0.25f;
+                            float oy = (sy - 1.5f) * 0.25f;
+                            
+                            float sampleX = fx + ox;
+                            float sampleY = fy + oy;
+                            
+                            if (sampleX < 0.0f || sampleX >= (float)(inW - 1) || 
+                                sampleY < 0.0f || sampleY >= (float)(inH - 1)) continue;
+                            
+                            float sdfC = getSDF_Hermite(sampleX, sampleY);
+                            
+                            float evalDist;
+                            if (direction == DIRECTION_INSIDE) {
+                                if (sdfC < 0.0f) continue;
+                                evalDist = sdfC;
+                            } else if (direction == DIRECTION_OUTSIDE) {
+                                if (sdfC > 0.0f) continue;
+                                evalDist = -sdfC;
+                            } else {
+                                evalDist = fabsf(sdfC);
+                            }
+                            
+                            if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
 
-                    // Calculate coverage using smoothstep
-                    float strokeCov;
-                    if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                        strokeCov = 1.0f;
-                    } else {
-                        strokeCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                            float sampleCov;
+                            if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
+                                sampleCov = 1.0f;
+                            } else {
+                                sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
+                            }
+                            totalCoverage += sampleCov;
+                            validSamples++;
+                        }
                     }
+                    
+                    if (validSamples == 0) continue;
+                    float strokeCov = totalCoverage / 16.0f;
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel8 dst = outData[ox];
