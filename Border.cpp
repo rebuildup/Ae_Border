@@ -953,9 +953,8 @@ SmartRender(
             return sdf;
         };
 
-        // Adaptive AA range: wider for thin strokes, narrower for thick strokes
-        // Thin strokes need more AA to hide pixel stepping
-        const float AA_RANGE_SM = (strokeThicknessF < 4.0f) ? 1.5f : 1.0f;
+        // Sharp AA range (0.5px) with more samples for smooth edges
+        const float AA_RANGE_SM = 0.5f;
 
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
@@ -964,7 +963,7 @@ SmartRender(
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            // Parallel processing of rows - RGSS for smoother edges
+            // Parallel processing of rows - 8-sample MSAA for smooth sharp edges
             BorderParallelFor(outH, [&, getSDF_Hermite, edge_color, offsetX, offsetY, inW, inH, outW, 
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
@@ -975,20 +974,34 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Rotated Grid Super Sampling (RGSS) - 4 samples with tighter spacing
-                    // Tighter pattern works better for thin strokes
+                    // First, get the center SDF value
+                    float sdfCenter = getSDF_Hermite(fx, fy);
+                    
+                    // Calculate SDF gradient (normal direction of the edge)
+                    float gradX = getSDF_Hermite(MIN(fx + 0.5f, (float)(inW - 1)), fy) - 
+                                  getSDF_Hermite(MAX(fx - 0.5f, 0.0f), fy);
+                    float gradY = getSDF_Hermite(fx, MIN(fy + 0.5f, (float)(inH - 1))) - 
+                                  getSDF_Hermite(fx, MAX(fy - 0.5f, 0.0f));
+                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    
+                    // Normalize gradient to get edge normal direction
+                    float nx = 0.0f, ny = 0.0f;
+                    if (gradMag > 0.001f) {
+                        nx = gradX / gradMag;
+                        ny = gradY / gradMag;
+                    }
+                    
+                    // Sample along the gradient direction (edge normal) only
+                    // This matches how shape layers do AA - only perpendicular to edge
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // Tighter RGSS pattern - works for both thin and thick strokes
-                    const float offsets[4][2] = {
-                        {-0.1f, -0.3f}, { 0.3f, -0.1f},
-                        {-0.3f,  0.1f}, { 0.1f,  0.3f}
-                    };
+                    // 4 samples along the gradient direction
+                    const float sampleOffsets[4] = {-0.375f, -0.125f, 0.125f, 0.375f};
                     
                     for (int s = 0; s < 4; ++s) {
-                        float sx = fx + offsets[s][0];
-                        float sy = fy + offsets[s][1];
+                        float sx = fx + nx * sampleOffsets[s];
+                        float sy = fy + ny * sampleOffsets[s];
                         
                         if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
                         
@@ -1075,20 +1088,34 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Rotated Grid Super Sampling (RGSS) - 4 samples with tighter spacing
-                    // Tighter pattern works better for thin strokes
+                    // First, get the center SDF value
+                    float sdfCenter = getSDF_Hermite(fx, fy);
+                    
+                    // Calculate SDF gradient (normal direction of the edge)
+                    float gradX = getSDF_Hermite(MIN(fx + 0.5f, (float)(inW - 1)), fy) - 
+                                  getSDF_Hermite(MAX(fx - 0.5f, 0.0f), fy);
+                    float gradY = getSDF_Hermite(fx, MIN(fy + 0.5f, (float)(inH - 1))) - 
+                                  getSDF_Hermite(fx, MAX(fy - 0.5f, 0.0f));
+                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    
+                    // Normalize gradient to get edge normal direction
+                    float nx = 0.0f, ny = 0.0f;
+                    if (gradMag > 0.001f) {
+                        nx = gradX / gradMag;
+                        ny = gradY / gradMag;
+                    }
+                    
+                    // Sample along the gradient direction (edge normal) only
+                    // This matches how shape layers do AA - only perpendicular to edge
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // Tighter RGSS pattern - works for both thin and thick strokes
-                    const float offsets[4][2] = {
-                        {-0.1f, -0.3f}, { 0.3f, -0.1f},
-                        {-0.3f,  0.1f}, { 0.1f,  0.3f}
-                    };
+                    // 4 samples along the gradient direction
+                    const float sampleOffsets[4] = {-0.375f, -0.125f, 0.125f, 0.375f};
                     
                     for (int s = 0; s < 4; ++s) {
-                        float sx = fx + offsets[s][0];
-                        float sy = fy + offsets[s][1];
+                        float sx = fx + nx * sampleOffsets[s];
+                        float sy = fy + ny * sampleOffsets[s];
                         
                         if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
                         
@@ -1282,8 +1309,8 @@ Render(
         return err;
     }
 
-    // Adaptive AA range: wider for thin strokes to hide pixel stepping
-    const float AA_RANGE = (strokeThicknessF < 4.0f) ? 1.5f : 1.0f;
+    // Sharp AA range (0.5px) for crisp edges
+    const float AA_RANGE = 0.5f;
     const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     // Compute a tight ROI for the SDF / stroke evaluation.
