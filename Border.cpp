@@ -1085,52 +1085,37 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // 16-sample MSAA for accurate coverage estimation
-                    // 4x4 grid pattern for even coverage across the pixel
-                    float totalCoverage = 0.0f;
-                    int validSamples = 0;
+                    // Get SDF at pixel center
+                    float sdfC = getSDF_Hermite(fx, fy);
                     
-                    for (int sy = 0; sy < 4; ++sy) {
-                        for (int sx = 0; sx < 4; ++sx) {
-                            // Offset within pixel: -0.375, -0.125, 0.125, 0.375
-                            float ox = (sx - 1.5f) * 0.25f;
-                            float oy = (sy - 1.5f) * 0.25f;
-                            
-                            float sampleX = fx + ox;
-                            float sampleY = fy + oy;
-                            
-                            if (sampleX < 0.0f || sampleX >= (float)(inW - 1) || 
-                                sampleY < 0.0f || sampleY >= (float)(inH - 1)) continue;
-                            
-                            float sdfC = getSDF_Hermite(sampleX, sampleY);
-                            
-                            float evalDist;
-                            if (direction == DIRECTION_INSIDE) {
-                                if (sdfC < 0.0f) continue;
-                                evalDist = sdfC;
-                            } else if (direction == DIRECTION_OUTSIDE) {
-                                if (sdfC > 0.0f) continue;
-                                evalDist = -sdfC;
-                            } else {
-                                evalDist = fabsf(sdfC);
-                            }
-                            
-                            if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
-
-                            // Calculate coverage for this sample
-                            float sampleCov;
-                            if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                                sampleCov = 1.0f;
-                            } else {
-                                sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                            }
-                            totalCoverage += sampleCov;
-                            validSamples++;
-                        }
+                    // Calculate SDF gradient (equivalent to ddx/ddy in shaders)
+                    // This gives us the rate of change of SDF per pixel
+                    float gradX = getSDF_Hermite(fx + 0.5f, fy) - getSDF_Hermite(fx - 0.5f, fy);
+                    float gradY = getSDF_Hermite(fx, fy + 0.5f) - getSDF_Hermite(fx, fy - 0.5f);
+                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    
+                    // Prevent division by zero
+                    if (gradMag < 0.001f) gradMag = 0.001f;
+                    
+                    // Evaluate distance based on direction
+                    float evalDist;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < 0.0f) continue;
+                        evalDist = sdfC;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > 0.0f) continue;
+                        evalDist = -sdfC;
+                    } else {
+                        evalDist = fabsf(sdfC);
                     }
                     
-                    if (validSamples == 0) continue;
-                    float strokeCov = totalCoverage / 16.0f;  // Always divide by 16 for consistent coverage
+                    // Convert to pixel distance using gradient magnitude
+                    // This makes AA adapt to edge angle automatically
+                    float pixelDist = (evalDist - strokeThicknessF) / gradMag;
+                    
+                    // Calculate coverage: 0.5 - pixelDist gives us smooth AA
+                    // saturate clamps to [0, 1]
+                    float strokeCov = CLAMP(0.5f - pixelDist, 0.0f, 1.0f);
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel16 dst = outData[ox];
@@ -1187,49 +1172,32 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // 16-sample MSAA for accurate coverage estimation
-                    float totalCoverage = 0.0f;
-                    int validSamples = 0;
+                    // Get SDF at pixel center
+                    float sdfC = getSDF_Hermite(fx, fy);
                     
-                    for (int sy = 0; sy < 4; ++sy) {
-                        for (int sx = 0; sx < 4; ++sx) {
-                            float ox = (sx - 1.5f) * 0.25f;
-                            float oy = (sy - 1.5f) * 0.25f;
-                            
-                            float sampleX = fx + ox;
-                            float sampleY = fy + oy;
-                            
-                            if (sampleX < 0.0f || sampleX >= (float)(inW - 1) || 
-                                sampleY < 0.0f || sampleY >= (float)(inH - 1)) continue;
-                            
-                            float sdfC = getSDF_Hermite(sampleX, sampleY);
-                            
-                            float evalDist;
-                            if (direction == DIRECTION_INSIDE) {
-                                if (sdfC < 0.0f) continue;
-                                evalDist = sdfC;
-                            } else if (direction == DIRECTION_OUTSIDE) {
-                                if (sdfC > 0.0f) continue;
-                                evalDist = -sdfC;
-                            } else {
-                                evalDist = fabsf(sdfC);
-                            }
-                            
-                            if (evalDist > strokeThicknessF + AA_RANGE_SM) continue;
-
-                            float sampleCov;
-                            if (evalDist <= strokeThicknessF - AA_RANGE_SM) {
-                                sampleCov = 1.0f;
-                            } else {
-                                sampleCov = 1.0f - smoothstep(strokeThicknessF - AA_RANGE_SM, strokeThicknessF + AA_RANGE_SM, evalDist);
-                            }
-                            totalCoverage += sampleCov;
-                            validSamples++;
-                        }
+                    // Calculate SDF gradient (equivalent to ddx/ddy in shaders)
+                    float gradX = getSDF_Hermite(fx + 0.5f, fy) - getSDF_Hermite(fx - 0.5f, fy);
+                    float gradY = getSDF_Hermite(fx, fy + 0.5f) - getSDF_Hermite(fx, fy - 0.5f);
+                    float gradMag = sqrtf(gradX * gradX + gradY * gradY);
+                    
+                    if (gradMag < 0.001f) gradMag = 0.001f;
+                    
+                    float evalDist;
+                    if (direction == DIRECTION_INSIDE) {
+                        if (sdfC < 0.0f) continue;
+                        evalDist = sdfC;
+                    } else if (direction == DIRECTION_OUTSIDE) {
+                        if (sdfC > 0.0f) continue;
+                        evalDist = -sdfC;
+                    } else {
+                        evalDist = fabsf(sdfC);
                     }
                     
-                    if (validSamples == 0) continue;
-                    float strokeCov = totalCoverage / 16.0f;
+                    // Convert to pixel distance using gradient magnitude
+                    float pixelDist = (evalDist - strokeThicknessF) / gradMag;
+                    
+                    // Calculate coverage
+                    float strokeCov = CLAMP(0.5f - pixelDist, 0.0f, 1.0f);
                     if (strokeCov < 0.001f) continue;
 
                     PF_Pixel8 dst = outData[ox];
