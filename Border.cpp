@@ -567,6 +567,47 @@ ComputeSignedDistanceField(
             signedDist[i] = solid ? sd : -sd;
         }
     });
+    
+    // Apply Gaussian blur to SDF for smoother edges
+    // This smooths out pixel-level stepping in the distance field
+    {
+        std::vector<int> blurred((size_t)w * (size_t)h);
+        
+        // 3x3 Gaussian kernel (sigma ≈ 0.85)
+        // [1 2 1]
+        // [2 4 2] / 16
+        // [1 2 1]
+        BorderParallelFor(h, [&](A_long y) {
+            const size_t row = (size_t)y * (size_t)w;
+            for (A_long x = 0; x < w; ++x) {
+                const size_t i = row + (size_t)x;
+                
+                // Handle boundaries
+                int x0 = MAX(x - 1, 0);
+                int x1 = x;
+                int x2 = MIN(x + 1, w - 1);
+                int y0 = MAX(y - 1, 0);
+                int y1 = y;
+                int y2 = MIN(y + 1, h - 1);
+                
+                // Sample 3x3 neighborhood
+                int sum = 0;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x0] * 1;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x1] * 2;
+                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x2] * 1;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x0] * 2;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x1] * 4;
+                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x2] * 2;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x0] * 1;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x1] * 2;
+                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x2] * 1;
+                
+                blurred[i] = sum / 16;
+            }
+        });
+        
+        signedDist = std::move(blurred);
+    }
 
     return PF_Err_NONE;
 }
