@@ -533,14 +533,36 @@ ComputeSignedDistanceField(
     edt2d(fBg, dtBg2);
 
     // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
-    // NOTE: The 0.5px center correction is applied later in the sampler.
+    // Apply alpha-based subpixel correction to achieve smooth edges.
     BorderParallelFor(h, [&](A_long y) {
         const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             const bool solid = (solidMask[i] != 0);
             const int d2 = solid ? dtBg2[i] : dtFg2[i];
-            const float dist = sqrtf((float)d2);
+            float dist = sqrtf((float)d2);
+            
+            // Alpha-based subpixel correction
+            // Get the alpha value at this pixel
+            float alpha;
+            if (PF_WORLD_IS_DEEP(input)) {
+                PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
+                alpha = p->alpha / (float)0x8000;  // Normalize to 0-1
+            } else {
+                PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
+                alpha = p->alpha / 255.0f;
+            }
+            
+            // For pixels near the edge (alpha not 0 or 1), use alpha to refine distance
+            // Alpha = 0.5 means exactly on edge (dist adjustment = 0)
+            // Alpha = 1.0 means 0.5px inside (dist adjustment = +0.5)
+            // Alpha = 0.0 means 0.5px outside (dist adjustment = -0.5)
+            if (alpha > 0.01f && alpha < 0.99f) {
+                float alphaOffset = (alpha - 0.5f);  // -0.5 to +0.5
+                dist += alphaOffset;
+                if (dist < 0.0f) dist = 0.0f;  // Clamp to prevent sign flip
+            }
+            
             const int sd = (int)floorf(dist * 10.0f + 0.5f);
             signedDist[i] = solid ? sd : -sd;
         }
@@ -974,25 +996,8 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center
+                    // Get SDF at pixel center (alpha-based correction already applied in SDF computation)
                     float sdfC = getSDF_Hermite(fx, fy);
-                    
-                    // Alpha-based SDF correction for subpixel edge precision
-                    // This uses the original image's anti-aliasing to refine edge position
-                    float srcAlpha = getSourceAlpha(fx, fy);
-                    
-                    // Near edges (where alpha is not 0 or 1), use alpha to estimate subpixel position
-                    // Alpha = 0.5 means exactly on edge, alpha > 0.5 means inside, alpha < 0.5 means outside
-                    if (srcAlpha > 0.01f && srcAlpha < 0.99f) {
-                        // Convert alpha to signed distance offset (-0.5 to +0.5 pixels)
-                        // This maps: alpha=0 → -0.5, alpha=0.5 → 0, alpha=1 → +0.5
-                        float alphaOffset = (srcAlpha - 0.5f);
-                        
-                        // Only apply correction near the boundary (where SDF is close to 0)
-                        if (fabsf(sdfC) < 1.5f) {
-                            sdfC += alphaOffset;
-                        }
-                    }
                     
                     float evalDist;
                     if (direction == DIRECTION_INSIDE) {
@@ -1070,18 +1075,8 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Get SDF at pixel center
+                    // Get SDF at pixel center (alpha-based correction already applied in SDF computation)
                     float sdfC = getSDF_Hermite(fx, fy);
-                    
-                    // Alpha-based SDF correction for subpixel edge precision
-                    float srcAlpha = getSourceAlpha(fx, fy);
-                    
-                    if (srcAlpha > 0.01f && srcAlpha < 0.99f) {
-                        float alphaOffset = (srcAlpha - 0.5f);
-                        if (fabsf(sdfC) < 1.5f) {
-                            sdfC += alphaOffset;
-                        }
-                    }
                     
                     float evalDist;
                     if (direction == DIRECTION_INSIDE) {
