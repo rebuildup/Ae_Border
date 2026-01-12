@@ -969,15 +969,15 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Rotated Grid Super Sampling (RGSS) - 4 samples rotated 45 degrees
-                    // More effective for diagonal edges than standard 2x2 grid
+                    // Rotated Grid Super Sampling (RGSS) - 4 samples with tighter spacing
+                    // Tighter pattern works better for thin strokes
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // RGSS pattern - optimized for diagonal edges
+                    // Tighter RGSS pattern - works for both thin and thick strokes
                     const float offsets[4][2] = {
-                        {-0.125f, -0.375f}, { 0.375f, -0.125f},
-                        {-0.375f,  0.125f}, { 0.125f,  0.375f}
+                        {-0.1f, -0.3f}, { 0.3f, -0.1f},
+                        {-0.3f,  0.1f}, { 0.1f,  0.3f}
                     };
                     
                     for (int s = 0; s < 4; ++s) {
@@ -1069,15 +1069,15 @@ SmartRender(
                     const float fx = (float)(ox - offsetX);
                     if (fx < 0.0f || fx >= (float)inW) continue;
 
-                    // Rotated Grid Super Sampling (RGSS) - 4 samples rotated 45 degrees
-                    // More effective for diagonal edges than standard 2x2 grid
+                    // Rotated Grid Super Sampling (RGSS) - 4 samples with tighter spacing
+                    // Tighter pattern works better for thin strokes
                     float totalCoverage = 0.0f;
                     int validSamples = 0;
                     
-                    // RGSS pattern - optimized for diagonal edges
+                    // Tighter RGSS pattern - works for both thin and thick strokes
                     const float offsets[4][2] = {
-                        {-0.125f, -0.375f}, { 0.375f, -0.125f},
-                        {-0.375f,  0.125f}, { 0.125f,  0.375f}
+                        {-0.1f, -0.3f}, { 0.3f, -0.1f},
+                        {-0.3f,  0.1f}, { 0.1f,  0.3f}
                     };
                     
                     for (int s = 0; s < 4; ++s) {
