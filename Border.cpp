@@ -917,8 +917,9 @@ SmartRender(
             }
         };
 
-        // Bilinear interpolated SDF lookup for smooth anti-aliasing
-        auto getSDF_Bilinear = [=](float fx, float fy) -> float {
+        // Hermite interpolated SDF lookup for smooth anti-aliasing
+        // Uses smoothstep for smoother gradients than bilinear interpolation
+        auto getSDF_Hermite = [=](float fx, float fy) -> float {
             // Clamp to valid range
             fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
             fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
@@ -930,16 +931,20 @@ SmartRender(
             float tx = fx - x0;
             float ty = fy - y0;
             
+            // Apply smoothstep for Hermite interpolation (smoother than linear)
+            float sx = smoothstep(0.0f, 1.0f, tx);
+            float sy = smoothstep(0.0f, 1.0f, ty);
+            
             // Sample 4 corners
             float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0] * 0.1f;
             float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1] * 0.1f;
             float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0] * 0.1f;
             float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1] * 0.1f;
             
-            // Bilinear interpolation
-            float d0 = d00 + (d10 - d00) * tx;
-            float d1 = d01 + (d11 - d01) * tx;
-            float sdf = d0 + (d1 - d0) * ty;
+            // Hermite interpolation using smoothstep weights
+            float d0 = d00 + (d10 - d00) * sx;
+            float d1 = d01 + (d11 - d01) * sx;
+            float sdf = d0 + (d1 - d0) * sy;
             
             // Apply 0.5px boundary correction
             if (sdf > 0.0f) sdf -= 0.5f;
@@ -958,8 +963,8 @@ SmartRender(
             edge_color.green = PF_BYTE_TO_CHAR(color.green);
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
-            // Parallel processing of rows - 2-sample diagonal AA for smoother edges
-            BorderParallelFor(outH, [&, getSDF_Bilinear, edge_color, offsetX, offsetY, inW, inH, outW, 
+            // Parallel processing of rows - RGSS for smoother edges
+            BorderParallelFor(outH, [&, getSDF_Hermite, edge_color, offsetX, offsetY, inW, inH, outW, 
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
@@ -986,7 +991,7 @@ SmartRender(
                         
                         if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
                         
-                        float sdfC = getSDF_Bilinear(sx, sy);
+                        float sdfC = getSDF_Hermite(sx, sy);
                         float evalDist;
                         if (direction == DIRECTION_INSIDE) {
                             if (sdfC < 0.0f) continue;
@@ -1058,8 +1063,8 @@ SmartRender(
             });
         }
         else {
-            // Parallel processing of rows (8-bit) - 2-sample diagonal AA for smoother edges
-            BorderParallelFor(outH, [&, getSDF_Bilinear, color, offsetX, offsetY, inW, inH, outW, 
+            // Parallel processing of rows (8-bit) - RGSS for smoother edges
+            BorderParallelFor(outH, [&, getSDF_Hermite, color, offsetX, offsetY, inW, inH, outW, 
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
@@ -1086,7 +1091,7 @@ SmartRender(
                         
                         if (sx < 0.0f || sx >= (float)(inW - 1) || sy < 0.0f || sy >= (float)(inH - 1)) continue;
                         
-                        float sdfC = getSDF_Bilinear(sx, sy);
+                        float sdfC = getSDF_Hermite(sx, sy);
                         float evalDist;
                         if (direction == DIRECTION_INSIDE) {
                             if (sdfC < 0.0f) continue;
@@ -1334,7 +1339,7 @@ Render(
         }
     };
 
-    // Bilinear SDF lookup for smooth anti-aliasing
+    // Hermite SDF lookup for smooth anti-aliasing
     auto sampleSDF = [&](float fx, float fy) -> float {
         fx = CLAMP(fx, (float)roiLeft, (float)roiRight - 0.001f);
         fy = CLAMP(fy, (float)roiTop, (float)roiBottom - 0.001f);
@@ -1346,15 +1351,20 @@ Render(
         int y1 = MIN(y0 + 1, (int)roiH - 1);
         float tx = lx - x0;
         float ty = ly - y0;
+        
+        // Apply smoothstep for Hermite interpolation (smoother than linear)
+        float sx = smoothstep(0.0f, 1.0f, tx);
+        float sy = smoothstep(0.0f, 1.0f, ty);
 
         int d00 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x0];
         int d10 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x1];
         int d01 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x0];
         int d11 = signedDist[(size_t)y1 * (size_t)roiW + (size_t)x1];
 
-        float d0 = d00 + (d10 - d00) * tx;
-        float d1 = d01 + (d11 - d01) * tx;
-        float d = d0 + (d1 - d0) * ty;
+        // Hermite interpolation using smoothstep weights
+        float d0 = d00 + (d10 - d00) * sx;
+        float d1 = d01 + (d11 - d01) * sx;
+        float d = d0 + (d1 - d0) * sy;
 
         float sdf = d * 0.1f;
         if (sdf > 0.0f) sdf -= 0.5f;
