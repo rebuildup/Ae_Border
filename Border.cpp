@@ -418,29 +418,22 @@ ComputeSignedDistanceField(
     A_long height)
 {
     const int INF = 1 << 29;
-    
-    // Compute SDF at 2x resolution for subpixel accuracy
-    const A_long w = width * 2;
-    const A_long h = height * 2;
+    const A_long w = width;
+    const A_long h = height;
 
     signedDist.clear();
 
-    // Bilinear interpolated alpha sampling at 2x resolution
+    // Get alpha at a pixel, bilinear interpolated for subpixel positions
     auto getAlpha = [&](float fx, float fy) -> float {
-        // Convert 2x coordinates to original coordinates
-        float ox = fx * 0.5f;
-        float oy = fy * 0.5f;
+        fx = CLAMP(fx, 0.0f, (float)(width - 1) - 0.001f);
+        fy = CLAMP(fy, 0.0f, (float)(height - 1) - 0.001f);
         
-        // Clamp to valid range
-        ox = CLAMP(ox, 0.0f, (float)(width - 1) - 0.001f);
-        oy = CLAMP(oy, 0.0f, (float)(height - 1) - 0.001f);
-        
-        int x0 = (int)ox;
-        int y0 = (int)oy;
+        int x0 = (int)fx;
+        int y0 = (int)fy;
         int x1 = MIN(x0 + 1, width - 1);
         int y1 = MIN(y0 + 1, height - 1);
-        float tx = ox - x0;
-        float ty = oy - y0;
+        float tx = fx - x0;
+        float ty = fy - y0;
         
         if (PF_WORLD_IS_DEEP(input)) {
             PF_Pixel16* row0 = (PF_Pixel16*)((char*)input->data + y0 * input->rowbytes);
@@ -465,14 +458,13 @@ ComputeSignedDistanceField(
         }
     };
     
-    // Use 0.5 threshold for antialiased edges
+    // Use 0.5 threshold for solid/empty classification
     auto isSolid = [&](A_long x, A_long y) -> bool {
         float alpha = getAlpha((float)x, (float)y);
         return alpha > 0.5f;
     };
 
     // 1D squared EDT (Felzenszwalb & Huttenlocher).
-    // Uses scratch buffers to avoid per-row/col allocations (important for SMART_RENDER tiling).
     auto edt1d = [&](const int* f, int n, int* d, std::vector<int>& v, std::vector<float>& z) {
         if ((int)v.size() < n) v.resize(n);
         if ((int)z.size() < n + 1) z.resize(n + 1);
@@ -485,8 +477,6 @@ ComputeSignedDistanceField(
         z[1] =  INF_F;
 
         auto sep = [&](int i, int u)->float {
-            // Intersection of parabolas from i and u:
-            // s = ((f[u] + u^2) - (f[i] + i^2)) / (2u - 2i)
             return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
         };
 
@@ -510,41 +500,28 @@ ComputeSignedDistanceField(
         }
     };
 
-    // 2D EDT: first along X (rows), then along Y (columns).
-    // Scratch buffers reused across calls (thread-safe across AE's threaded rendering).
     thread_local std::vector<int> tmp;
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
-        // Column pass writes every element; no need to prefill with INF.
         d2d.resize((size_t)w * (size_t)h);
+        tmp.resize((size_t)MAX(w, h));
 
-        // Row pass writes every element; no need to prefill.
-        if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
+        thread_local std::vector<int> lineIn, lineOut, vBuf;
+        thread_local std::vector<float> zBuf;
 
-        // Pass 1: rows
         BorderParallelFor(h, [&](A_long y) {
-            thread_local std::vector<int> vScratch;
-            thread_local std::vector<float> zScratch;
-            thread_local std::vector<int> lineIn;
-            thread_local std::vector<int> lineOut;
             lineIn.resize((size_t)w);
             lineOut.resize((size_t)w);
-            const size_t row = (size_t)y * (size_t)w;
-            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[row + (size_t)x];
-            edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
-            for (A_long x = 0; x < w; ++x) tmp[row + (size_t)x] = lineOut[(size_t)x];
+            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
+            edt1d(lineIn.data(), w, lineOut.data(), vBuf, zBuf);
+            for (A_long x = 0; x < w; ++x) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
         });
 
-        // Pass 2: columns
         BorderParallelFor(w, [&](A_long x) {
-            thread_local std::vector<int> vScratch;
-            thread_local std::vector<float> zScratch;
-            thread_local std::vector<int> lineIn;
-            thread_local std::vector<int> lineOut;
             lineIn.resize((size_t)h);
             lineOut.resize((size_t)h);
-            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
-            edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
+            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = d2d[(size_t)y * (size_t)w + (size_t)x];
+            edt1d(lineIn.data(), h, lineOut.data(), vBuf, zBuf);
             for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
         });
     };
@@ -570,8 +547,8 @@ ComputeSignedDistanceField(
     edt2d(fFg, dtFg2);
     edt2d(fBg, dtBg2);
 
-    // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
-    // Apply alpha-based subpixel correction to achieve smooth edges.
+    // Compute signed distance with alpha-based subpixel correction
+    signedDist.resize((size_t)w * (size_t)h);
     BorderParallelFor(h, [&](A_long y) {
         const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
@@ -581,24 +558,17 @@ ComputeSignedDistanceField(
             float dist = sqrtf((float)d2);
             
             // Alpha-based subpixel correction
-            // Get the alpha value at this pixel
-            float alpha;
-            if (PF_WORLD_IS_DEEP(input)) {
-                PF_Pixel16* p = (PF_Pixel16*)((char*)input->data + y * input->rowbytes) + x;
-                alpha = p->alpha / (float)0x8000;  // Normalize to 0-1
-            } else {
-                PF_Pixel8* p = (PF_Pixel8*)((char*)input->data + y * input->rowbytes) + x;
-                alpha = p->alpha / 255.0f;
-            }
+            // Use alpha to refine subpixel position of edge
+            float alpha = getAlpha((float)x, (float)y);
             
-            // For pixels near the edge (alpha not 0 or 1), use alpha to refine distance
-            // Alpha = 0.5 means exactly on edge (dist adjustment = 0)
-            // Alpha = 1.0 means 0.5px inside (dist adjustment = +0.5)
-            // Alpha = 0.0 means 0.5px outside (dist adjustment = -0.5)
+            // For pixels near the edge, use alpha to estimate subpixel offset
+            // alpha = 0.5 -> on edge, offset = 0
+            // alpha = 1.0 -> 0.5px inside, offset = +0.5
+            // alpha = 0.0 -> 0.5px outside, offset = -0.5
             if (alpha > 0.01f && alpha < 0.99f) {
-                float alphaOffset = (alpha - 0.5f);  // -0.5 to +0.5
+                float alphaOffset = (alpha - 0.5f);
                 dist += alphaOffset;
-                if (dist < 0.0f) dist = 0.0f;  // Clamp to prevent sign flip
+                if (dist < 0.0f) dist = 0.0f;
             }
             
             const int sd = (int)floorf(dist * 10.0f + 0.5f);
@@ -1019,43 +989,32 @@ SmartRender(
         };
 
         // Hermite interpolated SDF lookup for smooth anti-aliasing
-        // SDF is computed at 2x resolution, so we scale coordinates accordingly
-        const A_long sdfW = inW * 2;
-        const A_long sdfH = inH * 2;
-        
         auto getSDF_Hermite = [=](float fx, float fy) -> float {
-            // Scale to 2x resolution
-            float sx2 = fx * 2.0f;
-            float sy2 = fy * 2.0f;
-            
             // Clamp to valid range
-            sx2 = CLAMP(sx2, 0.0f, (float)(sdfW - 1) - 0.001f);
-            sy2 = CLAMP(sy2, 0.0f, (float)(sdfH - 1) - 0.001f);
+            fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
+            fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
             
-            int x0 = (int)sx2;
-            int y0 = (int)sy2;
-            int x1 = MIN(x0 + 1, sdfW - 1);
-            int y1 = MIN(y0 + 1, sdfH - 1);
-            float tx = sx2 - x0;
-            float ty = sy2 - y0;
+            int x0 = (int)fx;
+            int y0 = (int)fy;
+            int x1 = MIN(x0 + 1, inW - 1);
+            int y1 = MIN(y0 + 1, inH - 1);
+            float tx = fx - x0;
+            float ty = fy - y0;
             
             // Apply smoothstep for Hermite interpolation (smoother than linear)
             float hx = smoothstep(0.0f, 1.0f, tx);
             float hy = smoothstep(0.0f, 1.0f, ty);
             
-            // Sample 4 corners from 2x resolution SDF
-            float d00 = sdfData[(size_t)y0 * (size_t)sdfW + (size_t)x0] * 0.1f;
-            float d10 = sdfData[(size_t)y0 * (size_t)sdfW + (size_t)x1] * 0.1f;
-            float d01 = sdfData[(size_t)y1 * (size_t)sdfW + (size_t)x0] * 0.1f;
-            float d11 = sdfData[(size_t)y1 * (size_t)sdfW + (size_t)x1] * 0.1f;
+            // Sample 4 corners
+            float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0] * 0.1f;
+            float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1] * 0.1f;
+            float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0] * 0.1f;
+            float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1] * 0.1f;
             
             // Hermite interpolation using smoothstep weights
             float d0 = d00 + (d10 - d00) * hx;
             float d1 = d01 + (d11 - d01) * hx;
             float sdf = d0 + (d1 - d0) * hy;
-            
-            // Scale back to original resolution (divide by 2)
-            sdf *= 0.5f;
             
             // Apply 0.5px boundary correction
             if (sdf > 0.0f) sdf -= 0.5f;
