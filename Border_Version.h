@@ -1,14 +1,13 @@
 #pragma once
 
 // Border effect version definitions shared between runtime and PiPL.
-// Use an explicit packed value to keep PiPL and code in sync and avoid
-// PiPL parser issues with expressions on Windows.
+// Use PF_VERSION macro to ensure consistency and avoid calculation errors.
 #define MAJOR_VERSION 1
 #define MINOR_VERSION 0
 #define BUG_VERSION 0
 // 0 = develop, 1 = alpha, 2 = beta, 3 = release (per AE SDK)
-#define STAGE_VERSION 0
+#define STAGE_VERSION PF_Stage_DEVELOP
 #define BUILD_VERSION 2
 
-// PF_VERSION(1,0,0,PF_Stage_DEVELOP,2) evaluated offline: 0x00080002 (524290)
-#define BORDER_VERSION_VALUE 524290
+// Use PF_VERSION macro instead of manual calculation to prevent errors
+#define BORDER_VERSION_VALUE PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION)

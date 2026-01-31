@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <cstdint>
+#include <atomic>
 
 #ifdef _WIN32
 #include <omp.h>
@@ -15,31 +16,94 @@
 #undef max
 #endif
 
+// ============================================================================
+// Constants
+// ============================================================================
+namespace BorderConstants {
+    // EDT/SDF computation
+    static constexpr int EDT_INFINITY = 1 << 29;
+
+    // Alpha/gradient thresholds (epsilon values for floating-point comparisons)
+    static constexpr float ALPHA_EPSILON = 0.01f;         // For edge detection: alpha <= 0.01 or >= 0.99
+    static constexpr float ALPHA_NEAR_OPAQUE = 0.99f;      // Alpha value considered "fully opaque"
+    static constexpr float ALPHA_NEAR_TRANSPARENT = 0.01f; // Alpha value considered "fully transparent"
+    static constexpr float ALPHA_MIDPOINT = 0.5f;          // Midpoint for solid/empty classification
+    static constexpr float GRADIENT_EPSILON = 0.01f;       // Minimum gradient magnitude for edge normal calculation
+    static constexpr float GRADIENT_EPSILON_FINE = 0.001f; // Finer epsilon for subpixel calculations
+
+    // Coordinate clamping
+    static constexpr float COORD_EPSILON = 0.001f;         // Small offset to prevent out-of-bounds sampling
+
+    // Gaussian blur kernel weights (3x3 with sigma ~0.85)
+    static constexpr float GAUSSIAN_KERNEL_DIVISOR = 16.0f;
+
+    // Stroke computation
+    static constexpr float STROKE_HALF = 0.5f;             // Half stroke thickness for DIRECTION_BOTH
+    static constexpr float AA_RANGE_PX = 1.0f;             // Anti-aliasing range in pixels
+    static constexpr float SAMPLE_GUARD_PX = 1.0f;         // Sample guard band in pixels
+    static constexpr float COVERAGE_EPSILON = 0.001f;      // Minimum stroke coverage to process a pixel
+
+    // Subpixel sampling
+    static constexpr float SUBSAMPLE_OFFSET = 0.5f;        // Offset from pixel center to subpixel center
+    static constexpr float SUBSAMPLE_SCALE = 0.5f;         // Scale for subpixel offset calculation
+    static constexpr float SUBSAMPLE_4X_INV = 0.25f;       // Inverse of 4 for 2x2 supersampling average
+
+    // Sobel gradient weights
+    static constexpr float SOBEL_WEIGHT = 2.0f;            // Weight for center pixel in Sobel kernel
+    static constexpr float SOBEL_NORMALIZATION = 8.0f;     // Sobel gradient normalization factor
+    static constexpr float SOBEL_INVERSE_NORMALIZATION = (1.0f / 8.0f); // Pre-computed inverse
+
+    // Normalized alpha space
+    static constexpr float ALPHA_255 = 255.0f;             // 8-bit max alpha for normalization
+    static constexpr float ALPHA_255_INV = (1.0f / 255.0f); // Pre-computed inverse
+
+    // Smoothstep function constants
+    static constexpr float SMOOTHSTEP_ZERO = 0.0f;
+    static constexpr float SMOOTHSTEP_ONE = 1.0f;
+
+    // Distance scaling for integer chamfer distance
+    static constexpr float CHAMFER_SCALE = 10.0f;
+    static constexpr float CHAMFER_ROUND = 0.5f;
+
+    // Minimum gradient magnitude clamp
+    static constexpr float MIN_GRADIENT_MAGNITUDE = 0.001f;
+
+    // Dithering
+    static constexpr float DITHER_CENTER = 0.5f;           // Center value for dithering (0-1 range)
+
+    // AA range for signed distance field evaluation
+    static constexpr float AA_RANGE = 0.5f;
+
+    // Color clamping
+    static constexpr float COLOR_MIN = 0.0f;
+    static constexpr float COLOR_MAX = 1.0f;
+}
+
 // Clamp helper used by smoothstep
 template <typename T>
-T CLAMP(T value, T min, T max) {
+constexpr T CLAMP(T value, T min, T max) noexcept {
     if (value < min) return min;
     if (value > max) return max;
     return value;
 }
 
-inline float smoothstep(float edge0, float edge1, float x) {
-    float t = CLAMP((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+inline constexpr float smoothstep(float edge0, float edge1, float x) noexcept {
+    const float t = CLAMP((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 
 // Fast deterministic dither for 8bpc quantization (returns [0,1]).
 // AE's built-in vector renderers often dither when converting from higher precision,
 // which helps avoid visible "flat" plateaus in AA ramps at 8bpc.
-static inline float BorderDither8(A_long x, A_long y) {
+static inline float BorderDither8(A_long x, A_long y) noexcept {
     // 32-bit integer hash (PCG-ish mix), then take the low 8 bits.
-    uint32_t n = (uint32_t)x * 0x1f123bb5u + (uint32_t)y * 0x05491333u + 0x68bc21ebu;
+    uint32_t n = static_cast<uint32_t>(x) * 0x1f123bb5u + static_cast<uint32_t>(y) * 0x05491333u + 0x68bc21ebu;
     n ^= n >> 15;
     n *= 0x2c1b3c6du;
     n ^= n >> 12;
     n *= 0x297a2d39u;
     n ^= n >> 15;
-    return (float)(n & 0xFFu) / 255.0f;
+    return (static_cast<float>(n & 0xFFu)) / 255.0f;
 }
 
 struct EdgePoint {
@@ -61,7 +125,7 @@ static void BorderParallelForRange(A_long count, Fn fn);
 
 static bool
 BorderGetSolidBounds(
-    PF_EffectWorld* input,
+    const PF_EffectWorld* input,
     A_u_char threshold8,
     A_u_short threshold16,
     BorderRectI& outBounds)
@@ -137,8 +201,10 @@ BorderGetInternalThreadCount(A_long work_items)
 {
     if (work_items <= 1) return 1;
 
-    static int cached = -1;
-    if (cached < 0) {
+    // Thread-safe cached value using atomic operations with proper memory ordering
+    static std::atomic<int> cached{0};  // 0 = uninitialized
+    int value = cached.load(std::memory_order_acquire);
+    if (value == 0) {
         // Default to single-threaded internally.
         // After Effects already provides Multi-Frame Rendering (MFR) parallelism; additionally
         // spawning our own threads can oversubscribe CPU and even destabilize some hosts.
@@ -151,17 +217,19 @@ BorderGetInternalThreadCount(A_long work_items)
             char* endp = nullptr;
             errno = 0;
             long v = strtol(env_buf, &endp, 10);
-            if (errno == 0 && endp != env_buf) threads = (int)v;
+            if (errno == 0 && endp != env_buf) threads = static_cast<int>(v);
+            free(env_buf);  // Free immediately after use to avoid leak on any path
+            env_buf = nullptr;
         }
 #else
         if (const char* env = std::getenv("BORDER_THREADS")) {
             char* endp = nullptr;
             errno = 0;
             long v = strtol(env, &endp, 10);
-            if (errno == 0 && endp != env) threads = (int)v;
+            if (errno == 0 && endp != env) threads = static_cast<int>(v);
         }
 #endif
-        if (env_buf) free(env_buf);
+        // env_buf is already freed above on Windows path; safety check removed as it's unreachable
 
         // If explicitly set to 0 or negative, treat as "off".
         if (threads <= 0) threads = 1;
@@ -169,11 +237,14 @@ BorderGetInternalThreadCount(A_long work_items)
         // Conservative cap to reduce oversubscription under AE Multi-Frame Rendering.
         if (threads > 8) threads = 8;
         if (threads < 1) threads = 1;
-        cached = threads;
+
+        // Use release semantics to ensure the computed value is visible to other threads
+        cached.store(threads, std::memory_order_release);
+        value = threads;
     }
 
-    int t = cached;
-    if (t > (int)work_items) t = (int)work_items;
+    int t = cached.load(std::memory_order_relaxed);
+    if (t > static_cast<int>(work_items)) t = static_cast<int>(work_items);
     if (t < 1) t = 1;
     return t;
 }
@@ -233,7 +304,7 @@ About(
 {
     AEGP_SuiteHandler suites(in_data->pica_basicP);
 
-    suites.ANSICallbacksSuite1()->sprintf(out_data->return_msg,
+    PF_SPRINTF(out_data->return_msg,
         "%s v%d.%d\r%s",
         STR(StrID_Name),
         MAJOR_VERSION,
@@ -335,7 +406,7 @@ ParamsSetup(
 static inline float BorderDownscaleFactor(const PF_RationalScale& scale)
 {
     if (scale.den == 0) return 1.0f;
-    float v = (float)scale.num / (float)scale.den;
+    float v = static_cast<float>(scale.num) / static_cast<float>(scale.den);
     return (v > 0.0f) ? v : 1.0f;
 }
 
@@ -346,17 +417,24 @@ static inline void BorderComputePixelThickness(
     float& outStrokeThicknessPx,  // stroke thickness on the chosen side (pixels)
     A_long& outExpansionPx)       // expansion required (pixels)
 {
-    float downsize_x = (float)in_data->downsample_x.den / (float)in_data->downsample_x.num;
-    float downsize_y = (float)in_data->downsample_y.den / (float)in_data->downsample_y.num;
+    float numX = static_cast<float>(in_data->downsample_x.num);
+    float numY = static_cast<float>(in_data->downsample_y.num);
+    if (numX == 0.0f || numY == 0.0f) {
+        outStrokeThicknessPx = 0.0f;
+        outExpansionPx = 0;
+        return;
+    }
+    float downsize_x = static_cast<float>(in_data->downsample_x.den) / numX;
+    float downsize_y = static_cast<float>(in_data->downsample_y.den) / numY;
     float resolution_factor = MIN(downsize_x, downsize_y);
 
     float pixelThickness;
     if (thicknessParam <= 0.0f) {
         pixelThickness = 0.0f;
     } else if (thicknessParam <= 10.0f) {
-        pixelThickness = (float)thicknessParam;
+        pixelThickness = static_cast<float>(thicknessParam);
     } else {
-        float normalizedThickness = (float)((thicknessParam - 10.0f) / 90.0f);
+        float normalizedThickness = static_cast<float>((thicknessParam - 10.0f) / 90.0f);
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
@@ -364,17 +442,15 @@ static inline void BorderComputePixelThickness(
     if (direction == DIRECTION_OUTSIDE) {
         outsideThicknessPx = pixelThickness;
     } else if (direction == DIRECTION_BOTH) {
-        outsideThicknessPx = pixelThickness * 0.5f;
+        outsideThicknessPx = pixelThickness * BorderConstants::STROKE_HALF;
     }
 
     // This is used by the renderer for stroke evaluation.
-    outStrokeThicknessPx = (direction == DIRECTION_BOTH) ? (pixelThickness * 0.5f) : pixelThickness;
+    outStrokeThicknessPx = (direction == DIRECTION_BOTH) ? (pixelThickness * BorderConstants::STROKE_HALF) : pixelThickness;
 
     // Expand by outside thickness only (inside doesn't need extra pixels).
-    const float AA_RANGE_PX = 1.0f;
-    const float SAMPLE_GUARD_PX = 1.0f;
     if (outsideThicknessPx > 0.0f) {
-        outExpansionPx = (A_long)ceil((outsideThicknessPx / resolution_factor) + AA_RANGE_PX + SAMPLE_GUARD_PX);
+        outExpansionPx = static_cast<A_long>(ceil((outsideThicknessPx / resolution_factor) + BorderConstants::AA_RANGE_PX + BorderConstants::SAMPLE_GUARD_PX));
     } else {
         outExpansionPx = 0;
     }
@@ -395,7 +471,7 @@ FrameSetup(
     float strokeThicknessPx = 0.0f;
     A_long expansionPx = 0;
     BorderComputePixelThickness(in_data, thickness, direction, strokeThicknessPx, expansionPx);
-    (void)strokeThicknessPx;
+    [[maybe_unused]] float strokeThicknessPxUnused = strokeThicknessPx;
 
     // IMPORTANT: In PF_Cmd_FRAME_SETUP, the input layer param is not valid per the SDK docs.
     // Use in_data->width/height as the base buffer size for expansion.
@@ -403,8 +479,17 @@ FrameSetup(
     const A_long srcH = in_data->height;
 
     if (expansionPx > 0) {
-        out_data->width = srcW + expansionPx * 2;
-        out_data->height = srcH + expansionPx * 2;
+        // Check for integer overflow before computing expanded dimensions
+        // expansionPx * 2 could overflow, and adding to srcW could overflow
+        if (expansionPx > INT32_MAX / 2) {
+            return PF_Err_OUT_OF_MEMORY;
+        }
+        A_long expansion = expansionPx * 2;
+        if (srcW > INT32_MAX - expansion || srcH > INT32_MAX - expansion) {
+            return PF_Err_OUT_OF_MEMORY;
+        }
+        out_data->width = srcW + expansion;
+        out_data->height = srcH + expansion;
         out_data->origin.x = expansionPx;
         out_data->origin.y = expansionPx;
     } else {
@@ -416,281 +501,6 @@ FrameSetup(
 
     return err;
 }
-// Fast 3-4 chamfer distance transform (integer, scaled by 10) to compute
-// signed distance to the alpha edge. Positive inside opaque region, negative outside.
-//
-// NOTE:
-// The previous 3-4 chamfer distance had directional bias that could appear as a lateral
-// "shift" of the stroke (especially noticeable on diagonals / sharp corners).
-// We use an exact (grid) Euclidean Distance Transform (EDT) to avoid anisotropy.
-static PF_Err
-ComputeSignedDistanceField(
-    PF_EffectWorld* input,
-    A_u_char threshold8,
-    A_u_short threshold16,
-    std::vector<float>& signedDist, // float precision
-    A_long width,
-    A_long height)
-{
-    const int INF = 1 << 29;
-    const A_long w = width;
-    const A_long h = height;
-
-    signedDist.clear();
-
-    // Get alpha at a pixel, bilinear interpolated for subpixel positions
-    auto getAlpha = [&](float fx, float fy) -> float {
-        fx = CLAMP(fx, 0.0f, (float)(width - 1) - 0.001f);
-        fy = CLAMP(fy, 0.0f, (float)(height - 1) - 0.001f);
-        
-        int x0 = (int)fx;
-        int y0 = (int)fy;
-        int x1 = MIN(x0 + 1, width - 1);
-        int y1 = MIN(y0 + 1, height - 1);
-        float tx = fx - x0;
-        float ty = fy - y0;
-        
-        if (PF_WORLD_IS_DEEP(input)) {
-            PF_Pixel16* row0 = (PF_Pixel16*)((char*)input->data + y0 * input->rowbytes);
-            PF_Pixel16* row1 = (PF_Pixel16*)((char*)input->data + y1 * input->rowbytes);
-            float a00 = row0[x0].alpha / (float)PF_MAX_CHAN16;
-            float a10 = row0[x1].alpha / (float)PF_MAX_CHAN16;
-            float a01 = row1[x0].alpha / (float)PF_MAX_CHAN16;
-            float a11 = row1[x1].alpha / (float)PF_MAX_CHAN16;
-            float a0 = a00 + (a10 - a00) * tx;
-            float a1 = a01 + (a11 - a01) * tx;
-            return a0 + (a1 - a0) * ty;
-        } else {
-            PF_Pixel8* row0 = (PF_Pixel8*)((char*)input->data + y0 * input->rowbytes);
-            PF_Pixel8* row1 = (PF_Pixel8*)((char*)input->data + y1 * input->rowbytes);
-            float a00 = row0[x0].alpha / 255.0f;
-            float a10 = row0[x1].alpha / 255.0f;
-            float a01 = row1[x0].alpha / 255.0f;
-            float a11 = row1[x1].alpha / 255.0f;
-            float a0 = a00 + (a10 - a00) * tx;
-            float a1 = a01 + (a11 - a01) * tx;
-            return a0 + (a1 - a0) * ty;
-        }
-    };
-    
-    // Use 0.5 threshold for solid/empty classification
-    auto isSolid = [&](A_long x, A_long y) -> bool {
-        float alpha = getAlpha((float)x, (float)y);
-        return alpha > 0.5f;
-    };
-
-    // 1D squared EDT (Felzenszwalb & Huttenlocher).
-    auto edt1d = [&](const int* f, int n, int* d, std::vector<int>& v, std::vector<float>& z) {
-        if ((int)v.size() < n) v.resize(n);
-        if ((int)z.size() < n + 1) z.resize(n + 1);
-
-        const float INF_F = std::numeric_limits<float>::infinity();
-
-        int k = 0;
-        v[0] = 0;
-        z[0] = -INF_F;
-        z[1] =  INF_F;
-
-        auto sep = [&](int i, int u)->float {
-            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
-        };
-
-        for (int q = 1; q < n; ++q) {
-            float s = sep(v[k], q);
-            while (k > 0 && s <= z[k]) {
-                --k;
-                s = sep(v[k], q);
-            }
-            ++k;
-            v[k] = q;
-            z[k] = s;
-            z[k + 1] = INF_F;
-        }
-
-        k = 0;
-        for (int q = 0; q < n; ++q) {
-            while (z[k + 1] < (float)q) ++k;
-            int dx = q - v[k];
-            d[q] = dx * dx + f[v[k]];
-        }
-    };
-
-    thread_local std::vector<int> tmp;
-
-    auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
-        d2d.resize((size_t)w * (size_t)h);
-        tmp.resize((size_t)MAX(w, h));
-
-        thread_local std::vector<int> lineIn, lineOut, vBuf;
-        thread_local std::vector<float> zBuf;
-
-        BorderParallelFor(h, [&](A_long y) {
-            lineIn.resize((size_t)w);
-            lineOut.resize((size_t)w);
-            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[(size_t)y * (size_t)w + (size_t)x];
-            edt1d(lineIn.data(), w, lineOut.data(), vBuf, zBuf);
-            for (A_long x = 0; x < w; ++x) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)x];
-        });
-
-        BorderParallelFor(w, [&](A_long x) {
-            lineIn.resize((size_t)h);
-            lineOut.resize((size_t)h);
-            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = d2d[(size_t)y * (size_t)w + (size_t)x];
-            edt1d(lineIn.data(), h, lineOut.data(), vBuf, zBuf);
-            for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
-        });
-    };
-
-    // Build 0/INF grids for foreground/background feature points and cache solidity.
-    // dtFg2: squared distance to nearest solid pixel center
-    // dtBg2: squared distance to nearest transparent pixel center
-    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
-    std::vector<int> fFg((size_t)w * (size_t)h);
-    std::vector<int> fBg((size_t)w * (size_t)h);
-    BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
-        for (A_long x = 0; x < w; ++x) {
-            const bool solid = isSolid(x, y);
-            const size_t i = row + (size_t)x;
-            solidMask[i] = solid ? 1 : 0;
-            fFg[i] = solid ? 0 : INF;
-            fBg[i] = solid ? INF : 0;
-        }
-    });
-
-    std::vector<int> dtFg2, dtBg2;
-    edt2d(fFg, dtFg2);
-    edt2d(fBg, dtBg2);
-
-    // Compute signed distance with ESDT-inspired subpixel correction
-    // Based on: https://acko.net/blog/subpixel-distance-transform/
-    signedDist.resize((size_t)w * (size_t)h);
-    
-    // First, compute subpixel offsets for gray pixels using alpha gradient
-    std::vector<float> subpixelOffsetX((size_t)w * (size_t)h, 0.0f);
-    std::vector<float> subpixelOffsetY((size_t)w * (size_t)h, 0.0f);
-    
-    BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
-        for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
-            float alpha = getAlpha((float)x, (float)y);
-            
-            // Only process gray pixels (edge pixels)
-            if (alpha <= 0.01f || alpha >= 0.99f) continue;
-            
-            // Calculate alpha gradient using [1 2 1] smoothing kernel
-            // This gives us the direction to the edge
-            float gradX = 0.0f, gradY = 0.0f;
-            
-            // Horizontal gradient (with vertical smoothing)
-            if (x > 0 && x < w - 1) {
-                float a_left = getAlpha((float)(x - 1), (float)y);
-                float a_right = getAlpha((float)(x + 1), (float)y);
-                gradX = (a_right - a_left) * 0.5f;
-            }
-            
-            // Vertical gradient (with horizontal smoothing)
-            if (y > 0 && y < h - 1) {
-                float a_up = getAlpha((float)x, (float)(y - 1));
-                float a_down = getAlpha((float)x, (float)(y + 1));
-                gradY = (a_down - a_up) * 0.5f;
-            }
-            
-            float gradMag = sqrtf(gradX * gradX + gradY * gradY);
-            
-            if (gradMag > 0.01f) {
-                // Normalize gradient
-                float nx = gradX / gradMag;
-                float ny = gradY / gradMag;
-                
-                // Distance to edge based on alpha (alpha = 0.5 is on edge)
-                // alpha > 0.5: inside, need to move outward (positive direction of gradient)
-                // alpha < 0.5: outside, need to move inward (negative direction of gradient)
-                float distToEdge = (alpha - 0.5f);  // -0.5 to +0.5
-                
-                // Subpixel offset in the direction of the gradient
-                subpixelOffsetX[i] = nx * distToEdge;
-                subpixelOffsetY[i] = ny * distToEdge;
-            }
-        }
-    });
-    
-    // Now compute SDF with subpixel corrections
-    BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
-        for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
-            const bool solid = (solidMask[i] != 0);
-            const int d2 = solid ? dtBg2[i] : dtFg2[i];
-            float dist = sqrtf((float)d2);
-            
-            // Apply subpixel correction
-            float alpha = getAlpha((float)x, (float)y);
-            if (alpha > 0.01f && alpha < 0.99f) {
-                // Use the subpixel offset magnitude
-                float offsetMag = sqrtf(subpixelOffsetX[i] * subpixelOffsetX[i] + 
-                                        subpixelOffsetY[i] * subpixelOffsetY[i]);
-                
-                // For pixels near the edge, adjust distance based on alpha
-                // If alpha > 0.5, we're inside so add distance
-                // If alpha < 0.5, we're outside so subtract distance
-                if (solid) {
-                    dist += offsetMag;  // Push outward
-                } else {
-                    dist += offsetMag;  // Distance to edge
-                }
-            }
-            
-            // Store as float for full precision
-            signedDist[i] = solid ? dist : -dist;
-        }
-    });
-    
-    // Apply Gaussian blur to SDF for smoother edges
-    // This smooths out pixel-level stepping in the distance field
-    {
-        std::vector<float> blurred((size_t)w * (size_t)h);
-        
-        // 3x3 Gaussian kernel (sigma ≈ 0.85)
-        // [1 2 1]
-        // [2 4 2] / 16
-        // [1 2 1]
-        BorderParallelFor(h, [&](A_long y) {
-            const size_t row = (size_t)y * (size_t)w;
-            for (A_long x = 0; x < w; ++x) {
-                const size_t i = row + (size_t)x;
-                
-                // Handle boundaries
-                int x0 = MAX(x - 1, 0);
-                int x1 = x;
-                int x2 = MIN(x + 1, w - 1);
-                int y0 = MAX(y - 1, 0);
-                int y1 = y;
-                int y2 = MIN(y + 1, h - 1);
-                
-                // Sample 3x3 neighborhood
-                float sum = 0.0f;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x0] * 1.0f;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x1] * 2.0f;
-                sum += signedDist[(size_t)y0 * (size_t)w + (size_t)x2] * 1.0f;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x0] * 2.0f;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x1] * 4.0f;
-                sum += signedDist[(size_t)y1 * (size_t)w + (size_t)x2] * 2.0f;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x0] * 1.0f;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x1] * 2.0f;
-                sum += signedDist[(size_t)y2 * (size_t)w + (size_t)x2] * 1.0f;
-                
-                blurred[i] = sum / 16.0f;
-            }
-        });
-        
-        signedDist = std::move(blurred);
-    }
-
-    return PF_Err_NONE;
-}
-
 // Computes signed distance to the *alpha edge* (alpha == threshold) with subpixel precision.
 //
 // Why this exists:
@@ -703,32 +513,36 @@ ComputeSignedDistanceField(
 //      using a Sobel alpha gradient, then measures distance to that edge point.
 static PF_Err
 ComputeSignedDistanceField_EdgeEDT(
-    PF_EffectWorld* input,
+    const PF_EffectWorld* input,
     A_u_char threshold8,
-    A_u_short threshold16,
+    [[maybe_unused]] A_u_short threshold16,
     std::vector<float>& signedDist,
     A_long width,
     A_long height)
 {
-    (void)threshold16;
-    const int INF = 1 << 29;
+    const int INF = BorderConstants::EDT_INFINITY;
     const A_long w = width;
     const A_long h = height;
+
+    // Check for integer overflow in w * h calculation
+    if (w > 0 && h > INT32_MAX / w) {
+        return PF_Err_OUT_OF_MEMORY;
+    }
 
     signedDist.clear();
 
     if (w <= 0 || h <= 0) return PF_Err_NONE;
 
     // Alpha threshold in normalized 0..1 space. Threshold==0 means "auto" (0.5).
-    const float thresholdNorm = (threshold8 == 0) ? 0.5f : (threshold8 / 255.0f);
+    const float thresholdNorm = (threshold8 == 0) ? BorderConstants::ALPHA_MIDPOINT : (threshold8 * BorderConstants::ALPHA_255_INV);
 
     // Get alpha at a pixel, bilinear interpolated for subpixel positions (normalized 0..1).
     auto getAlpha = [&](float fx, float fy) -> float {
-        fx = CLAMP(fx, 0.0f, (float)(w - 1) - 0.001f);
-        fy = CLAMP(fy, 0.0f, (float)(h - 1) - 0.001f);
+        fx = CLAMP(fx, 0.0f, static_cast<float>(w - 1) - BorderConstants::COORD_EPSILON);
+        fy = CLAMP(fy, 0.0f, static_cast<float>(h - 1) - BorderConstants::COORD_EPSILON);
 
-        int x0 = (int)fx;
-        int y0 = (int)fy;
+        int x0 = static_cast<int>(fx);
+        int y0 = static_cast<int>(fy);
         int x1 = MIN(x0 + 1, w - 1);
         int y1 = MIN(y0 + 1, h - 1);
         float tx = fx - x0;
@@ -747,10 +561,10 @@ ComputeSignedDistanceField_EdgeEDT(
         } else {
             PF_Pixel8* row0 = (PF_Pixel8*)((char*)input->data + y0 * input->rowbytes);
             PF_Pixel8* row1 = (PF_Pixel8*)((char*)input->data + y1 * input->rowbytes);
-            float a00 = row0[x0].alpha / 255.0f;
-            float a10 = row0[x1].alpha / 255.0f;
-            float a01 = row1[x0].alpha / 255.0f;
-            float a11 = row1[x1].alpha / 255.0f;
+            float a00 = row0[x0].alpha * BorderConstants::ALPHA_255_INV;
+            float a10 = row0[x1].alpha * BorderConstants::ALPHA_255_INV;
+            float a01 = row1[x0].alpha * BorderConstants::ALPHA_255_INV;
+            float a11 = row1[x1].alpha * BorderConstants::ALPHA_255_INV;
             float a0 = a00 + (a10 - a00) * tx;
             float a1 = a01 + (a11 - a01) * tx;
             return a0 + (a1 - a0) * ty;
@@ -758,7 +572,7 @@ ComputeSignedDistanceField_EdgeEDT(
     };
 
     auto isSolid = [&](A_long x, A_long y) -> bool {
-        float alpha = getAlpha((float)x, (float)y);
+        float alpha = getAlpha(static_cast<float>(x), static_cast<float>(y));
         return alpha > thresholdNorm;
     };
 
@@ -776,8 +590,8 @@ ComputeSignedDistanceField_EdgeEDT(
             return;
         }
 
-        if ((int)v.size() < n) v.resize(n);
-        if ((int)z.size() < n + 1) z.resize(n + 1);
+        if (static_cast<int>(v.size()) < n) v.resize(n);
+        if (static_cast<int>(z.size()) < n + 1) z.resize(n + 1);
 
         const float INF_F = std::numeric_limits<float>::infinity();
 
@@ -804,7 +618,7 @@ ComputeSignedDistanceField_EdgeEDT(
 
         k = 0;
         for (int q = 0; q < n; ++q) {
-            while (z[k + 1] < (float)q) ++k;
+            while (z[k + 1] < static_cast<float>(q)) ++k;
             const int site = v[k];
             const int dx = q - site;
             d[q] = dx * dx + f[site];
@@ -813,19 +627,19 @@ ComputeSignedDistanceField_EdgeEDT(
     };
 
     // Solid + boundary masks.
-    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
+    std::vector<A_u_char> solidMask(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
-            solidMask[row + (size_t)x] = isSolid(x, y) ? 1 : 0;
+            solidMask[row + static_cast<size_t>(x)] = isSolid(x, y) ? 1 : 0;
         }
     });
 
-    std::vector<A_u_char> edgeMask((size_t)w * (size_t)h, 0);
+    std::vector<A_u_char> edgeMask(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
+            const size_t i = row + static_cast<size_t>(x);
             const A_u_char s = solidMask[i];
             bool edge = false;
             if (x > 0) edge |= (solidMask[i - 1] != s);
@@ -841,15 +655,15 @@ ComputeSignedDistanceField_EdgeEDT(
         if (edgeMask[i]) { anyEdge = true; break; }
     }
     if (!anyEdge) {
-        signedDist.resize((size_t)w * (size_t)h, 0.0f);
+        signedDist.resize(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
         return PF_Err_NONE;
     }
 
     // Subpixel edge points for boundary pixels by solving alpha(x)=threshold along the alpha gradient.
-    std::vector<float> edgeX((size_t)w * (size_t)h, 0.0f);
-    std::vector<float> edgeY((size_t)w * (size_t)h, 0.0f);
+    std::vector<float> edgeX(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
+    std::vector<float> edgeY(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             if (!edgeMask[i]) continue;
@@ -873,12 +687,13 @@ ComputeSignedDistanceField_EdgeEDT(
             const float a12 = a(x,     y + 1);
             const float a22 = a(x + 1, y + 1);
 
-            const float gradX = (a20 + 2.0f * a21 + a22) - (a00 + 2.0f * a01 + a02);
-            const float gradY = (a02 + 2.0f * a12 + a22) - (a00 + 2.0f * a10 + a20);
+            const float gradX = (a20 + BorderConstants::SOBEL_WEIGHT * a21 + a22) - (a00 + BorderConstants::SOBEL_WEIGHT * a01 + a02);
+            const float gradY = (a02 + BorderConstants::SOBEL_WEIGHT * a12 + a22) - (a00 + BorderConstants::SOBEL_WEIGHT * a10 + a20);
 
-            float gx = gradX * (1.0f / 8.0f);
-            float gy = gradY * (1.0f / 8.0f);
+            float gx = gradX * BorderConstants::SOBEL_INVERSE_NORMALIZATION;
+            float gy = gradY * BorderConstants::SOBEL_INVERSE_NORMALIZATION;
             float gmag = sqrtf(gx * gx + gy * gy);
+            if (!std::isfinite(gmag) || gmag < BorderConstants::MIN_GRADIENT_MAGNITUDE) { gmag = 1.0f; }
 
             // Fallback normal from mask if alpha gradient is too small (flat alpha regions).
             if (gmag < 1e-5f) {
@@ -905,7 +720,7 @@ ComputeSignedDistanceField_EdgeEDT(
             const float alpha0 = getAlpha(ax, ay);
 
             float t = (thresholdNorm - alpha0) / gmag;
-            t = CLAMP(t, -0.5f, 0.5f);
+            t = CLAMP(t, -BorderConstants::STROKE_HALF, BorderConstants::STROKE_HALF);
 
             edgeX[i] = ax + nx * t;
             edgeY[i] = ay + ny * t;
@@ -913,9 +728,9 @@ ComputeSignedDistanceField_EdgeEDT(
     });
 
     // Build 0/INF grid for boundary sites.
-    std::vector<int> fEdge((size_t)w * (size_t)h, INF);
+    std::vector<int> fEdge(static_cast<size_t>(w) * static_cast<size_t>(h), INF);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             if (edgeMask[i]) fEdge[i] = 0;
@@ -923,51 +738,51 @@ ComputeSignedDistanceField_EdgeEDT(
     });
 
     // 2D EDT: first pass over rows.
-    std::vector<int> tmpD((size_t)w * (size_t)h);
-    std::vector<int> tmpArgX((size_t)w * (size_t)h);
+    std::vector<int> tmpD(static_cast<size_t>(w) * static_cast<size_t>(h));
+    std::vector<int> tmpArgX(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(h, [&](A_long y) {
         thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
         thread_local std::vector<float> zBuf;
-        lineIn.resize((size_t)w);
-        lineOut.resize((size_t)w);
-        lineArg.resize((size_t)w);
+        lineIn.resize(static_cast<size_t>(w));
+        lineOut.resize(static_cast<size_t>(w));
+        lineArg.resize(static_cast<size_t>(w));
 
-        const size_t row = (size_t)y * (size_t)w;
-        for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = fEdge[row + (size_t)x];
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
+        for (A_long x = 0; x < w; ++x) lineIn[static_cast<size_t>(x)] = fEdge[row + static_cast<size_t>(x)];
 
-        edt1d(lineIn.data(), (int)w, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        edt1d(lineIn.data(), static_cast<int>(w), lineOut.data(), lineArg.data(), vBuf, zBuf);
         for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
-            tmpD[i] = lineOut[(size_t)x];
-            tmpArgX[i] = lineArg[(size_t)x];
+            const size_t i = row + static_cast<size_t>(x);
+            tmpD[i] = lineOut[static_cast<size_t>(x)];
+            tmpArgX[i] = lineArg[static_cast<size_t>(x)];
         }
     });
 
     // 2D EDT: second pass over columns, propagating nearest site coordinates.
-    std::vector<int> nearX((size_t)w * (size_t)h);
-    std::vector<int> nearY((size_t)w * (size_t)h);
+    std::vector<int> nearX(static_cast<size_t>(w) * static_cast<size_t>(h));
+    std::vector<int> nearY(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(w, [&](A_long x) {
         thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
         thread_local std::vector<float> zBuf;
-        lineIn.resize((size_t)h);
-        lineOut.resize((size_t)h);
-        lineArg.resize((size_t)h);
+        lineIn.resize(static_cast<size_t>(h));
+        lineOut.resize(static_cast<size_t>(h));
+        lineArg.resize(static_cast<size_t>(h));
 
-        for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmpD[(size_t)y * (size_t)w + (size_t)x];
+        for (A_long y = 0; y < h; ++y) lineIn[static_cast<size_t>(y)] = tmpD[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)];
 
-        edt1d(lineIn.data(), (int)h, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        edt1d(lineIn.data(), static_cast<int>(h), lineOut.data(), lineArg.data(), vBuf, zBuf);
         for (A_long y = 0; y < h; ++y) {
-            const int sy = lineArg[(size_t)y];
-            const size_t site = (size_t)sy * (size_t)w + (size_t)x;
-            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const int sy = lineArg[static_cast<size_t>(y)];
+            const size_t site = static_cast<size_t>(sy) * static_cast<size_t>(w) + static_cast<size_t>(x);
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
             nearX[i] = tmpArgX[site];
             nearY[i] = sy;
         }
     });
 
-    signedDist.resize((size_t)w * (size_t)h);
+    signedDist.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             const bool solid = (solidMask[i] != 0);
@@ -983,9 +798,10 @@ ComputeSignedDistanceField_EdgeEDT(
                 ey = edgeY[si];
             }
 
-            const float dx = (float)x - ex;
-            const float dy = (float)y - ey;
-            const float dist = sqrtf(dx * dx + dy * dy);
+            const float dx = static_cast<float>(x) - ex;
+            const float dy = static_cast<float>(y) - ey;
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (!std::isfinite(dist)) dist = 0.0f;
             signedDist[i] = solid ? dist : -dist;
         }
     });
@@ -1002,17 +818,29 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
     GetAlphaAtFn getAlphaAt,
     std::vector<float>& signedDist)
 {
-    const int INF = 1 << 29;
+    const int INF = BorderConstants::EDT_INFINITY;
     const A_long w = width;
     const A_long h = height;
+
+    // Check for integer overflow in w * h calculation
+    if (w > 0 && h > INT32_MAX / w) {
+        signedDist.clear();
+        return;
+    }
 
     signedDist.clear();
     if (w <= 0 || h <= 0) return;
 
+    // Additional check for size_t overflow
+    if (static_cast<size_t>(w) > SIZE_MAX / static_cast<size_t>(h)) {
+        signedDist.clear();
+        return;
+    }
+
     // Clamp + read.
     auto alphaAt = [&](A_long x, A_long y) -> float {
-        x = CLAMP(x, (A_long)0, w - 1);
-        y = CLAMP(y, (A_long)0, h - 1);
+        x = CLAMP(x, static_cast<A_long>(0), w - 1);
+        y = CLAMP(y, static_cast<A_long>(0), h - 1);
         return getAlphaAt(x, y);
     };
 
@@ -1030,8 +858,8 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
             return;
         }
 
-        if ((int)v.size() < n) v.resize(n);
-        if ((int)z.size() < n + 1) z.resize(n + 1);
+        if (static_cast<int>(v.size()) < n) v.resize(n);
+        if (static_cast<int>(z.size()) < n + 1) z.resize(n + 1);
 
         const float INF_F = std::numeric_limits<float>::infinity();
 
@@ -1041,7 +869,7 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
         z[1] = INF_F;
 
         auto sep = [&](int i, int u)->float {
-            return ((float)(f[u] + u * u) - (float)(f[i] + i * i)) / (2.0f * (u - i));
+            return ((static_cast<float>(f[u] + u * u)) - (static_cast<float>(f[i] + i * i))) / (2.0f * (u - i));
         };
 
         for (int q = 1; q < n; ++q) {
@@ -1058,7 +886,7 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
 
         k = 0;
         for (int q = 0; q < n; ++q) {
-            while (z[k + 1] < (float)q) ++k;
+            while (z[k + 1] < static_cast<float>(q)) ++k;
             const int site = v[k];
             const int dx = q - site;
             d[q] = dx * dx + f[site];
@@ -1067,7 +895,7 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
     };
 
     // Solid + boundary masks.
-    std::vector<A_u_char> solidMask((size_t)w * (size_t)h, 0);
+    std::vector<A_u_char> solidMask(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
     BorderParallelFor(h, [&](A_long y) {
         const size_t row = (size_t)y * (size_t)w;
         for (A_long x = 0; x < w; ++x) {
@@ -1076,11 +904,11 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
         }
     });
 
-    std::vector<A_u_char> edgeMask((size_t)w * (size_t)h, 0);
+    std::vector<A_u_char> edgeMask(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
+            const size_t i = row + static_cast<size_t>(x);
             const A_u_char s = solidMask[i];
             bool edge = false;
             if (x > 0) edge |= (solidMask[i - 1] != s);
@@ -1119,12 +947,13 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
             const float a12 = alphaAt(x,     y + 1);
             const float a22 = alphaAt(x + 1, y + 1);
 
-            const float gradX = (a20 + 2.0f * a21 + a22) - (a00 + 2.0f * a01 + a02);
-            const float gradY = (a02 + 2.0f * a12 + a22) - (a00 + 2.0f * a10 + a20);
+            const float gradX = (a20 + BorderConstants::SOBEL_WEIGHT * a21 + a22) - (a00 + BorderConstants::SOBEL_WEIGHT * a01 + a02);
+            const float gradY = (a02 + BorderConstants::SOBEL_WEIGHT * a12 + a22) - (a00 + BorderConstants::SOBEL_WEIGHT * a10 + a20);
 
-            float gx = gradX * (1.0f / 8.0f);
-            float gy = gradY * (1.0f / 8.0f);
+            float gx = gradX * BorderConstants::SOBEL_INVERSE_NORMALIZATION;
+            float gy = gradY * BorderConstants::SOBEL_INVERSE_NORMALIZATION;
             float gmag = sqrtf(gx * gx + gy * gy);
+            if (!std::isfinite(gmag) || gmag < BorderConstants::MIN_GRADIENT_MAGNITUDE) { gmag = 1.0f; }
 
             // Fallback normal from mask if alpha gradient is too small (flat alpha regions).
             if (gmag < 1e-5f) {
@@ -1151,7 +980,7 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
             const float alpha0 = alphaAt(x, y);
 
             float t = (thresholdNorm - alpha0) / gmag;
-            t = CLAMP(t, -0.5f, 0.5f);
+            t = CLAMP(t, -BorderConstants::STROKE_HALF, BorderConstants::STROKE_HALF);
 
             edgeX[i] = (float)x + nx * t;
             edgeY[i] = (float)y + ny * t;
@@ -1159,9 +988,9 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
     });
 
     // Build 0/INF grid for boundary sites.
-    std::vector<int> fEdge((size_t)w * (size_t)h, INF);
+    std::vector<int> fEdge(static_cast<size_t>(w) * static_cast<size_t>(h), INF);
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             if (edgeMask[i]) fEdge[i] = 0;
@@ -1169,51 +998,51 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
     });
 
     // 2D EDT: first pass over rows.
-    std::vector<int> tmpD((size_t)w * (size_t)h);
-    std::vector<int> tmpArgX((size_t)w * (size_t)h);
+    std::vector<int> tmpD(static_cast<size_t>(w) * static_cast<size_t>(h));
+    std::vector<int> tmpArgX(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(h, [&](A_long y) {
         thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
         thread_local std::vector<float> zBuf;
-        lineIn.resize((size_t)w);
-        lineOut.resize((size_t)w);
-        lineArg.resize((size_t)w);
+        lineIn.resize(static_cast<size_t>(w));
+        lineOut.resize(static_cast<size_t>(w));
+        lineArg.resize(static_cast<size_t>(w));
 
-        const size_t row = (size_t)y * (size_t)w;
-        for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = fEdge[row + (size_t)x];
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
+        for (A_long x = 0; x < w; ++x) lineIn[static_cast<size_t>(x)] = fEdge[row + static_cast<size_t>(x)];
 
-        edt1d(lineIn.data(), (int)w, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        edt1d(lineIn.data(), static_cast<int>(w), lineOut.data(), lineArg.data(), vBuf, zBuf);
         for (A_long x = 0; x < w; ++x) {
-            const size_t i = row + (size_t)x;
-            tmpD[i] = lineOut[(size_t)x];
-            tmpArgX[i] = lineArg[(size_t)x];
+            const size_t i = row + static_cast<size_t>(x);
+            tmpD[i] = lineOut[static_cast<size_t>(x)];
+            tmpArgX[i] = lineArg[static_cast<size_t>(x)];
         }
     });
 
     // 2D EDT: second pass over columns, propagating nearest site coordinates.
-    std::vector<int> nearX((size_t)w * (size_t)h);
-    std::vector<int> nearY((size_t)w * (size_t)h);
+    std::vector<int> nearX(static_cast<size_t>(w) * static_cast<size_t>(h));
+    std::vector<int> nearY(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(w, [&](A_long x) {
         thread_local std::vector<int> lineIn, lineOut, lineArg, vBuf;
         thread_local std::vector<float> zBuf;
-        lineIn.resize((size_t)h);
-        lineOut.resize((size_t)h);
-        lineArg.resize((size_t)h);
+        lineIn.resize(static_cast<size_t>(h));
+        lineOut.resize(static_cast<size_t>(h));
+        lineArg.resize(static_cast<size_t>(h));
 
-        for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmpD[(size_t)y * (size_t)w + (size_t)x];
+        for (A_long y = 0; y < h; ++y) lineIn[static_cast<size_t>(y)] = tmpD[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)];
 
-        edt1d(lineIn.data(), (int)h, lineOut.data(), lineArg.data(), vBuf, zBuf);
+        edt1d(lineIn.data(), static_cast<int>(h), lineOut.data(), lineArg.data(), vBuf, zBuf);
         for (A_long y = 0; y < h; ++y) {
-            const int sy = lineArg[(size_t)y];
-            const size_t site = (size_t)sy * (size_t)w + (size_t)x;
-            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const int sy = lineArg[static_cast<size_t>(y)];
+            const size_t site = static_cast<size_t>(sy) * static_cast<size_t>(w) + static_cast<size_t>(x);
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
             nearX[i] = tmpArgX[site];
             nearY[i] = sy;
         }
     });
 
-    signedDist.resize((size_t)w * (size_t)h);
+    signedDist.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
     BorderParallelFor(h, [&](A_long y) {
-        const size_t row = (size_t)y * (size_t)w;
+        const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
         for (A_long x = 0; x < w; ++x) {
             const size_t i = row + (size_t)x;
             const bool solid = (solidMask[i] != 0);
@@ -1229,9 +1058,10 @@ ComputeSignedDistanceField_EdgeEDT_FromAlpha(
                 ey = edgeY[si];
             }
 
-            const float dx = (float)x - ex;
-            const float dy = (float)y - ey;
-            const float dist = sqrtf(dx * dx + dy * dy);
+            const float dx = static_cast<float>(x) - ex;
+            const float dy = static_cast<float>(y) - ey;
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (!std::isfinite(dist)) dist = 0.0f;
             signedDist[i] = solid ? dist : -dist;
         }
     });
@@ -1245,9 +1075,21 @@ ComputeSignedDistanceFieldFromSolid(
     IsSolidFn isSolid,
     std::vector<int>& signedDist) // scaled by 10
 {
-    const int INF = 1 << 29;
+    const int INF = BorderConstants::EDT_INFINITY;
     const A_long w = width;
     const A_long h = height;
+
+    // Check for integer overflow in w * h calculation
+    if (w > 0 && h > INT32_MAX / w) {
+        signedDist.clear();
+        return;
+    }
+
+    // Additional check for size_t overflow
+    if (static_cast<size_t>(w) > SIZE_MAX / static_cast<size_t>(h)) {
+        signedDist.clear();
+        return;
+    }
 
     signedDist.assign(w * h, 0);
 
@@ -1293,22 +1135,22 @@ ComputeSignedDistanceFieldFromSolid(
 
     auto edt2d = [&](const std::vector<int>& f2d, std::vector<int>& d2d) {
         // Column pass writes every element; no need to prefill with INF.
-        d2d.resize((size_t)w * (size_t)h);
+        d2d.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
 
         // Row pass writes every element; no need to prefill.
-        if (tmp.size() != (size_t)w * (size_t)h) tmp.resize((size_t)w * (size_t)h);
+        if (tmp.size() != static_cast<size_t>(w) * static_cast<size_t>(h)) tmp.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
 
         BorderParallelFor(h, [&](A_long y) {
             thread_local std::vector<int> vScratch;
             thread_local std::vector<float> zScratch;
             thread_local std::vector<int> lineIn;
             thread_local std::vector<int> lineOut;
-            lineIn.resize((size_t)w);
-            lineOut.resize((size_t)w);
-            const size_t row = (size_t)y * (size_t)w;
-            for (A_long x = 0; x < w; ++x) lineIn[(size_t)x] = f2d[row + (size_t)x];
-            edt1d(lineIn.data(), (int)w, lineOut.data(), vScratch, zScratch);
-            for (A_long x = 0; x < w; ++x) tmp[row + (size_t)x] = lineOut[(size_t)x];
+            lineIn.resize(static_cast<size_t>(w));
+            lineOut.resize(static_cast<size_t>(w));
+            const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
+            for (A_long x = 0; x < w; ++x) lineIn[static_cast<size_t>(x)] = f2d[row + static_cast<size_t>(x)];
+            edt1d(lineIn.data(), static_cast<int>(w), lineOut.data(), vScratch, zScratch);
+            for (A_long x = 0; x < w; ++x) tmp[row + static_cast<size_t>(x)] = lineOut[static_cast<size_t>(x)];
         });
 
         BorderParallelFor(w, [&](A_long x) {
@@ -1316,11 +1158,11 @@ ComputeSignedDistanceFieldFromSolid(
             thread_local std::vector<float> zScratch;
             thread_local std::vector<int> lineIn;
             thread_local std::vector<int> lineOut;
-            lineIn.resize((size_t)h);
-            lineOut.resize((size_t)h);
-            for (A_long y = 0; y < h; ++y) lineIn[(size_t)y] = tmp[(size_t)y * (size_t)w + (size_t)x];
-            edt1d(lineIn.data(), (int)h, lineOut.data(), vScratch, zScratch);
-            for (A_long y = 0; y < h; ++y) d2d[(size_t)y * (size_t)w + (size_t)x] = lineOut[(size_t)y];
+            lineIn.resize(static_cast<size_t>(h));
+            lineOut.resize(static_cast<size_t>(h));
+            for (A_long y = 0; y < h; ++y) lineIn[static_cast<size_t>(y)] = tmp[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)];
+            edt1d(lineIn.data(), static_cast<int>(h), lineOut.data(), vScratch, zScratch);
+            for (A_long y = 0; y < h; ++y) d2d[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)] = lineOut[static_cast<size_t>(y)];
         });
     };
 
@@ -1355,12 +1197,13 @@ ComputeSignedDistanceFieldFromSolid(
     // Signed distance to the nearest opposite-class pixel center (pixels), scaled by 10.
     // NOTE: The 0.5px center correction is applied later in the sampler.
     signedDist.resize(n);
-    BorderParallelFor((A_long)n, [&](A_long ii) {
-        const size_t i = (size_t)ii;
+    BorderParallelFor(static_cast<A_long>(n), [&](A_long ii) {
+        const size_t i = static_cast<size_t>(ii);
         const bool solid = (solidMask[i] != 0);
         const int d2 = solid ? dtBg2[i] : dtFg2[i];
-        const float dist = sqrtf((float)d2);
-        const int sd = (int)floorf(dist * 10.0f + 0.5f);
+        float dist = sqrtf(static_cast<float>(d2));
+        if (!std::isfinite(dist)) dist = 0.0f;
+        const int sd = static_cast<int>(floorf(dist * 10.0f + 0.5f));
         signedDist[i] = solid ? sd : -sd;
     });
 }
@@ -1415,13 +1258,14 @@ SmartRender(
 {
     PF_Err err = PF_Err_NONE;
 
-    A_long checkout_id = (A_long)(intptr_t)extra->input->pre_render_data;
+    A_long checkout_id = static_cast<A_long>(reinterpret_cast<intptr_t>(extra->input->pre_render_data));
 
     PF_EffectWorld* input = NULL;
     PF_EffectWorld* output = NULL;
 
     ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, checkout_id, &input));
     if (err) return err;
+    if (!input) return PF_Err_BAD_CALLBACK_PARAM;
 
     ERR(extra->cb->checkout_output(in_data->effect_ref, &output));
     if (err) return err;
@@ -1459,8 +1303,13 @@ SmartRender(
     if (!err) showLineOnly = param.u.bd.value;
     PF_CHECKIN_PARAM(in_data, &param);
 
-    float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
-    float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
+    float numX = static_cast<float>(in_data->downsample_x.num);
+    float numY = static_cast<float>(in_data->downsample_y.num);
+    if (numX == 0.0f || numY == 0.0f) {
+        return PF_Err_BAD_CALLBACK_PARAM;
+    }
+    float downsize_x = static_cast<float>(in_data->downsample_x.den) / numX;
+    float downsize_y = static_cast<float>(in_data->downsample_y.den) / numY;
     float resolution_factor = MIN(downsize_x, downsize_y);
 
     float pixelThickness;
@@ -1478,7 +1327,7 @@ SmartRender(
     A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
     float thicknessF = static_cast<float>(thicknessInt);
     // BOTH draws half inside + half outside so visible幅=thicknessF
-    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
+    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * BorderConstants::STROKE_HALF : thicknessF;
 
     if (input && output) {
         // Calculate offset between input and output (output may be expanded)
@@ -1572,11 +1421,11 @@ SmartRender(
 
         // Get source alpha at subpixel position (bilinear interpolated)
         auto getSourceAlpha = [&](float fx, float fy) -> float {
-            fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
-            fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
-            
-            int x0 = (int)fx;
-            int y0 = (int)fy;
+            fx = CLAMP(fx, 0.0f, static_cast<float>(inW - 1) - BorderConstants::COORD_EPSILON);
+            fy = CLAMP(fy, 0.0f, static_cast<float>(inH - 1) - BorderConstants::COORD_EPSILON);
+
+            int x0 = static_cast<int>(fx);
+            int y0 = static_cast<int>(fy);
             int x1 = MIN(x0 + 1, inW - 1);
             int y1 = MIN(y0 + 1, inH - 1);
             float tx = fx - x0;
@@ -1608,11 +1457,11 @@ SmartRender(
         // Hermite interpolated SDF lookup for smooth anti-aliasing
         auto getSDF_Hermite = [=](float fx, float fy) -> float {
             // Clamp to valid range
-            fx = CLAMP(fx, 0.0f, (float)(inW - 1) - 0.001f);
-            fy = CLAMP(fy, 0.0f, (float)(inH - 1) - 0.001f);
-            
-            int x0 = (int)fx;
-            int y0 = (int)fy;
+            fx = CLAMP(fx, 0.0f, static_cast<float>(inW - 1) - BorderConstants::COORD_EPSILON);
+            fy = CLAMP(fy, 0.0f, static_cast<float>(inH - 1) - BorderConstants::COORD_EPSILON);
+
+            int x0 = static_cast<int>(fx);
+            int y0 = static_cast<int>(fy);
             int x1 = MIN(x0 + 1, inW - 1);
             int y1 = MIN(y0 + 1, inH - 1);
             float tx = fx - x0;
@@ -1621,13 +1470,13 @@ SmartRender(
             // Apply smoothstep for Hermite interpolation (smoother than linear)
             float hx = smoothstep(0.0f, 1.0f, tx);
             float hy = smoothstep(0.0f, 1.0f, ty);
-            
+
             // Sample 4 corners
             // SDF is now stored as float, no need to scale
-            float d00 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x0];
-            float d10 = sdfData[(size_t)y0 * (size_t)inW + (size_t)x1];
-            float d01 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x0];
-            float d11 = sdfData[(size_t)y1 * (size_t)inW + (size_t)x1];
+            float d00 = sdfData[static_cast<size_t>(y0) * static_cast<size_t>(inW) + static_cast<size_t>(x0)];
+            float d10 = sdfData[static_cast<size_t>(y0) * static_cast<size_t>(inW) + static_cast<size_t>(x1)];
+            float d01 = sdfData[static_cast<size_t>(y1) * static_cast<size_t>(inW) + static_cast<size_t>(x0)];
+            float d11 = sdfData[static_cast<size_t>(y1) * static_cast<size_t>(inW) + static_cast<size_t>(x1)];
             
             // Hermite interpolation using smoothstep weights
             float d0 = d00 + (d10 - d00) * hx;
@@ -1638,7 +1487,7 @@ SmartRender(
         };
 
         // Sharp AA range (0.5px) with more samples for smooth edges
-        const float AA_RANGE_SM = 0.5f;
+        const float AA_RANGE_SM = BorderConstants::AA_RANGE;
 
         if (PF_WORLD_IS_DEEP(output)) {
             PF_Pixel16 edge_color;
@@ -1648,7 +1497,8 @@ SmartRender(
             edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
             // Parallel processing of rows - 8-sample MSAA for smooth sharp edges
-            BorderParallelFor(outH, [&, getSDF_Hermite, edge_color, offsetX, offsetY, inW, inH, outW, 
+            // Capture output by reference (needed for data access), all other values by value
+            BorderParallelFor(outH, [&output, getSDF_Hermite, edge_color, offsetX, offsetY, inW, inH, outW,
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
@@ -1661,16 +1511,16 @@ SmartRender(
                     // 4x Supersampling (2x2 grid) for shape layer-like AA
                     // This ensures neighboring pixels have different coverage values
                     float totalCoverage = 0.0f;
-                    
+
                     // 2x2 subpixel grid with offsets: -0.25, +0.25
                     for (int sy = 0; sy < 2; ++sy) {
                         for (int sx = 0; sx < 2; ++sx) {
-                            float subX = fx + (sx - 0.5f) * 0.5f;
-                            float subY = fy + (sy - 0.5f) * 0.5f;
-                            
+                            float subX = fx + (static_cast<float>(sx) - BorderConstants::STROKE_HALF) * BorderConstants::SUBSAMPLE_SCALE;
+                            float subY = fy + (static_cast<float>(sy) - BorderConstants::STROKE_HALF) * BorderConstants::SUBSAMPLE_SCALE;
+
                             // Get SDF at subpixel position
                             float sdfC = getSDF_Hermite(subX, subY);
-                            
+
                             // Evaluate distance based on direction
                             float evalDist;
                             if (direction == DIRECTION_INSIDE) {
@@ -1682,26 +1532,26 @@ SmartRender(
                             } else {
                                 evalDist = fabsf(sdfC);
                             }
-                            
+
                             // Calculate gradient at subpixel position
                             float gradX = getSDF_Hermite(subX + 0.25f, subY) - getSDF_Hermite(subX - 0.25f, subY);
                             float gradY = getSDF_Hermite(subX, subY + 0.25f) - getSDF_Hermite(subX, subY - 0.25f);
                             float gradMag = sqrtf(gradX * gradX + gradY * gradY) * 2.0f;  // Scale back to per-pixel
-                            if (gradMag < 0.001f) gradMag = 0.001f;
-                            
+                            if (!std::isfinite(gradMag) || gradMag < BorderConstants::MIN_GRADIENT_MAGNITUDE) gradMag = BorderConstants::MIN_GRADIENT_MAGNITUDE;
+
                             // Distance to stroke edge in pixels
                             float distToEdge = (evalDist - strokeThicknessF) / gradMag;
-                            
+
                             // Coverage for this subpixel
-                            float subCov = 0.5f - distToEdge;
+                            float subCov = BorderConstants::STROKE_HALF - distToEdge;
                             subCov = CLAMP(subCov, 0.0f, 1.0f);
                             totalCoverage += subCov;
                         }
                     }
-                    
+
                     // Average coverage from 4 subpixels
-                    float strokeCov = totalCoverage * 0.25f;
-                    if (strokeCov < 0.001f) continue;
+                    float strokeCov = totalCoverage * BorderConstants::SUBSAMPLE_4X_INV;
+                    if (strokeCov < BorderConstants::COVERAGE_EPSILON) continue;
 
                     PF_Pixel16 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
@@ -1711,7 +1561,7 @@ SmartRender(
                         dst.red   = edge_color.red;
                         dst.green = edge_color.green;
                         dst.blue  = edge_color.blue;
-                        dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCov + 0.5f);
+                        dst.alpha = static_cast<A_u_short>(PF_MAX_CHAN16 * strokeCov + 0.5f);
                     } else {
                         // Straight alpha compositing (Porter-Duff over)
                         float strokeA = strokeCov;
@@ -1721,7 +1571,7 @@ SmartRender(
                         float strokeB = edge_color.blue / (float)PF_MAX_CHAN16;
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
                         float outR, outG, outB;
-                        if (outA > 0.001f) {
+                        if (outA > BorderConstants::COVERAGE_EPSILON) {
                             // Straight alpha: divide by output alpha to get unmultiplied color
                             float dstR = dst.red / (float)PF_MAX_CHAN16;
                             float dstG = dst.green / (float)PF_MAX_CHAN16;
@@ -1735,10 +1585,10 @@ SmartRender(
                             outG = strokeG;
                             outB = strokeB;
                         }
-                        dst.alpha = (A_u_short)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.red   = (A_u_short)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.green = (A_u_short)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
-                        dst.blue  = (A_u_short)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN16 + 0.5f);
+                        dst.alpha = static_cast<A_u_short>(CLAMP(outA, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN16 + 0.5f);
+                        dst.red   = static_cast<A_u_short>(CLAMP(outR, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN16 + 0.5f);
+                        dst.green = static_cast<A_u_short>(CLAMP(outG, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN16 + 0.5f);
+                        dst.blue  = static_cast<A_u_short>(CLAMP(outB, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN16 + 0.5f);
                     }
 
                     outData[ox] = dst;
@@ -1747,7 +1597,8 @@ SmartRender(
         }
         else {
             // Parallel processing of rows (8-bit) - RGSS for smoother edges
-            BorderParallelFor(outH, [&, getSDF_Hermite, color, offsetX, offsetY, inW, inH, outW, 
+            // Capture output by reference (needed for data access), all other values by value
+            BorderParallelFor(outH, [&output, getSDF_Hermite, color, offsetX, offsetY, inW, inH, outW,
                                       strokeThicknessF, direction, showLineOnly, AA_RANGE_SM](A_long oy) {
                 PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
                 const float fy = (float)(oy - offsetY);
@@ -1759,14 +1610,14 @@ SmartRender(
 
                     // 4x Supersampling (2x2 grid) for shape layer-like AA
                     float totalCoverage = 0.0f;
-                    
+
                     for (int sy = 0; sy < 2; ++sy) {
                         for (int sx = 0; sx < 2; ++sx) {
-                            float subX = fx + (sx - 0.5f) * 0.5f;
-                            float subY = fy + (sy - 0.5f) * 0.5f;
-                            
+                            float subX = fx + (static_cast<float>(sx) - BorderConstants::STROKE_HALF) * BorderConstants::SUBSAMPLE_SCALE;
+                            float subY = fy + (static_cast<float>(sy) - BorderConstants::STROKE_HALF) * BorderConstants::SUBSAMPLE_SCALE;
+
                             float sdfC = getSDF_Hermite(subX, subY);
-                            
+
                             float evalDist;
                             if (direction == DIRECTION_INSIDE) {
                                 if (sdfC < 0.0f) continue;
@@ -1777,24 +1628,24 @@ SmartRender(
                             } else {
                                 evalDist = fabsf(sdfC);
                             }
-                            
+
                             float gradX = getSDF_Hermite(subX + 0.25f, subY) - getSDF_Hermite(subX - 0.25f, subY);
                             float gradY = getSDF_Hermite(subX, subY + 0.25f) - getSDF_Hermite(subX, subY - 0.25f);
                             float gradMag = sqrtf(gradX * gradX + gradY * gradY) * 2.0f;
-                            if (gradMag < 0.001f) gradMag = 0.001f;
-                            
+                            if (!std::isfinite(gradMag) || gradMag < BorderConstants::MIN_GRADIENT_MAGNITUDE) gradMag = BorderConstants::MIN_GRADIENT_MAGNITUDE;
+
                             float distToEdge = (evalDist - strokeThicknessF) / gradMag;
-                            float subCov = CLAMP(0.5f - distToEdge, 0.0f, 1.0f);
+                            float subCov = CLAMP(BorderConstants::STROKE_HALF - distToEdge, 0.0f, 1.0f);
                             totalCoverage += subCov;
                         }
                     }
-                    
+
                     float strokeCov = totalCoverage * 0.25f;
-                    if (strokeCov < 0.001f) continue;
+                    if (strokeCov < BorderConstants::COVERAGE_EPSILON) continue;
 
                     // Dither coverage before 8bpc quantization to avoid visible plateaus.
                     float strokeA = strokeCov;
-                    strokeA = CLAMP(strokeA + (BorderDither8(ox, oy) - 0.5f) / 255.0f, 0.0f, 1.0f);
+                    strokeA = CLAMP(strokeA + (BorderDither8(ox, oy) - BorderConstants::DITHER_CENTER) / 255.0f, 0.0f, 1.0f);
 
                     PF_Pixel8 dst = outData[ox];
                     float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN8;
@@ -1804,7 +1655,7 @@ SmartRender(
                         dst.red   = color.red;
                         dst.green = color.green;
                         dst.blue  = color.blue;
-                        dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeA + 0.5f);
+                        dst.alpha = static_cast<A_u_char>(PF_MAX_CHAN8 * strokeA + 0.5f);
                     } else {
                         // Straight alpha compositing (Porter-Duff over)
                         float invStrokeA = 1.0f - strokeA;
@@ -1813,7 +1664,7 @@ SmartRender(
                         float strokeB = color.blue / (float)PF_MAX_CHAN8;
                         float outA = strokeA + dstAlphaNorm * invStrokeA;
                         float outR, outG, outB;
-                        if (outA > 0.001f) {
+                        if (outA > BorderConstants::COVERAGE_EPSILON) {
                             // Straight alpha: divide by output alpha to get unmultiplied color
                             float dstR = dst.red / (float)PF_MAX_CHAN8;
                             float dstG = dst.green / (float)PF_MAX_CHAN8;
@@ -1827,10 +1678,10 @@ SmartRender(
                             outG = strokeG;
                             outB = strokeB;
                         }
-                        dst.alpha = (A_u_char)(CLAMP(outA, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.red   = (A_u_char)(CLAMP(outR, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.green = (A_u_char)(CLAMP(outG, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
-                        dst.blue  = (A_u_char)(CLAMP(outB, 0.0f, 1.0f) * PF_MAX_CHAN8 + 0.5f);
+                        dst.alpha = static_cast<A_u_char>(CLAMP(outA, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN8 + 0.5f);
+                        dst.red   = static_cast<A_u_char>(CLAMP(outR, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN8 + 0.5f);
+                        dst.green = static_cast<A_u_char>(CLAMP(outG, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN8 + 0.5f);
+                        dst.blue  = static_cast<A_u_char>(CLAMP(outB, BorderConstants::COLOR_MIN, BorderConstants::COLOR_MAX) * PF_MAX_CHAN8 + 0.5f);
                     }
 
                     outData[ox] = dst;
@@ -1857,30 +1708,30 @@ Render(
 
     PF_FpLong thickness = params[BORDER_THICKNESS]->u.fs_d.value;
     PF_Pixel8 color = params[BORDER_COLOR]->u.cd.value;
-    A_u_char threshold = (A_u_char)params[BORDER_THRESHOLD]->u.sd.value;
+    A_u_char threshold = static_cast<A_u_char>(params[BORDER_THRESHOLD]->u.sd.value);
     A_long direction = params[BORDER_DIRECTION]->u.pd.value;
     PF_Boolean showLineOnly = params[BORDER_SHOW_LINE_ONLY]->u.bd.value;
 
-    float downsize_x = (float)in_data->downsample_x.den / (float)in_data->downsample_x.num;
-    float downsize_y = (float)in_data->downsample_y.den / (float)in_data->downsample_y.num;
+    float downsize_x = static_cast<float>(in_data->downsample_x.den) / static_cast<float>(in_data->downsample_x.num);
+    float downsize_y = static_cast<float>(in_data->downsample_y.den) / static_cast<float>(in_data->downsample_y.num);
     float resolution_factor = MIN(downsize_x, downsize_y);
 
     float pixelThickness;
     if (thickness <= 0.0f) {
         pixelThickness = 0.0f;
     } else if (thickness <= 10.0f) {
-        pixelThickness = (float)thickness;
+        pixelThickness = static_cast<float>(thickness);
     } else {
-        float normalizedThickness = (float)((thickness - 10.0f) / 90.0f);
+        float normalizedThickness = static_cast<float>((thickness - 10.0f) / 90.0f);
         pixelThickness = 10.0f + 40.0f * sqrtf(normalizedThickness);
     }
 
-    A_long thicknessInt = (A_long)(pixelThickness / resolution_factor + 0.5f);
-    float thicknessF = (float)thicknessInt;
-    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * 0.5f : thicknessF;
+    A_long thicknessInt = static_cast<A_long>(pixelThickness / resolution_factor + 0.5f);
+    float thicknessF = static_cast<float>(thicknessInt);
+    float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * BorderConstants::STROKE_HALF : thicknessF;
 
-    const A_long originX = in_data->output_origin_x;
-    const A_long originY = in_data->output_origin_y;
+    const A_long originX = in_data->origin_x;
+    const A_long originY = in_data->origin_y;
 
     const A_long outW = output->width;
     const A_long outH = output->height;
@@ -1957,7 +1808,7 @@ Render(
     }
 
     // Sharp AA range (0.5px) for crisp edges
-    const float AA_RANGE = 0.5f;
+    const float AA_RANGE = BorderConstants::AA_RANGE;
     const float MAX_EVAL_DIST = strokeThicknessF + AA_RANGE + 1.0f;
 
     // Compute a tight ROI for the SDF / stroke evaluation.
@@ -1979,8 +1830,7 @@ Render(
     const A_long roiBottom = CLAMP(solidOutB + pad, (A_long)0, outH - 1);
 
     const A_long roiW = roiRight - roiLeft + 1;
-    const A_long roiH = roiBottom - roiTop + 1;
-    (void)roiH;
+    [[maybe_unused]] const A_long roiH = roiBottom - roiTop + 1;
 
     const float thresholdNorm = thresholdSdf8 / 255.0f;
     auto getAlphaRoi = [&](A_long lx, A_long ly) -> float {
@@ -2004,20 +1854,20 @@ Render(
 
     // Hermite SDF lookup for smooth anti-aliasing
     auto sampleSDF = [&](float fx, float fy) -> float {
-        fx = CLAMP(fx, (float)roiLeft, (float)roiRight - 0.001f);
-        fy = CLAMP(fy, (float)roiTop, (float)roiBottom - 0.001f);
-        float lx = fx - (float)roiLeft;
-        float ly = fy - (float)roiTop;
-        int x0 = (int)lx;
-        int y0 = (int)ly;
+        fx = CLAMP(fx, static_cast<float>(roiLeft), static_cast<float>(roiRight) - BorderConstants::COORD_EPSILON);
+        fy = CLAMP(fy, static_cast<float>(roiTop), static_cast<float>(roiBottom) - BorderConstants::COORD_EPSILON);
+        float lx = fx - static_cast<float>(roiLeft);
+        float ly = fy - static_cast<float>(roiTop);
+        int x0 = static_cast<int>(lx);
+        int y0 = static_cast<int>(ly);
         int x1 = MIN(x0 + 1, (int)roiW - 1);
         int y1 = MIN(y0 + 1, (int)roiH - 1);
         float tx = lx - x0;
         float ty = ly - y0;
         
         // Apply smoothstep for Hermite interpolation (smoother than linear)
-        float sx = smoothstep(0.0f, 1.0f, tx);
-        float sy = smoothstep(0.0f, 1.0f, ty);
+        float sx = smoothstep(BorderConstants::SMOOTHSTEP_ZERO, BorderConstants::SMOOTHSTEP_ONE, tx);
+        float sy = smoothstep(BorderConstants::SMOOTHSTEP_ZERO, BorderConstants::SMOOTHSTEP_ONE, ty);
 
         float d00 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x0];
         float d10 = signedDist[(size_t)y0 * (size_t)roiW + (size_t)x1];
@@ -2064,14 +1914,15 @@ Render(
         edge_color.blue = PF_BYTE_TO_CHAR(color.blue);
 
         const A_long roiH = roiBottom - roiTop + 1;
-        BorderParallelFor(roiH, [&](A_long ly) {
+        // Capture output and lambdas by reference, all other values by value
+        BorderParallelFor(roiH, [&output, &sampleSDF, &strokeSampleCoverage, edge_color, roiLeft, roiRight, roiTop, showLineOnly](A_long ly) {
             const A_long oy = roiTop + ly;
             PF_Pixel16* outData = (PF_Pixel16*)((char*)output->data + oy * output->rowbytes);
             for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 // Single sample with subpixel alpha correction
                 float sdfC = sampleSDF((float)ox, (float)oy);
                 float strokeCoverage = strokeSampleCoverage(sdfC);
-                if (strokeCoverage < 0.001f) continue;
+                if (strokeCoverage < BorderConstants::COVERAGE_EPSILON) continue;
 
                 PF_Pixel16 dst = outData[ox];
                 float dstAlphaNorm = dst.alpha / (float)PF_MAX_CHAN16;
@@ -2081,7 +1932,7 @@ Render(
                     dst.red = edge_color.red;
                     dst.green = edge_color.green;
                     dst.blue = edge_color.blue;
-                    dst.alpha = (A_u_short)(PF_MAX_CHAN16 * strokeCoverage + 0.5f);
+                    dst.alpha = static_cast<A_u_short>(PF_MAX_CHAN16 * strokeCoverage + 0.5f);
                 } else {
                     // Straight alpha compositing (Porter-Duff over)
                     float strokeA = strokeCoverage;
@@ -2120,14 +1971,15 @@ Render(
         });
     } else {
         const A_long roiH = roiBottom - roiTop + 1;
-        BorderParallelFor(roiH, [&](A_long ly) {
+        // Capture output and lambdas by reference, all other values by value
+        BorderParallelFor(roiH, [&output, &sampleSDF, &strokeSampleCoverage, color, roiLeft, roiRight, roiTop, showLineOnly](A_long ly) {
             const A_long oy = roiTop + ly;
             PF_Pixel8* outData = (PF_Pixel8*)((char*)output->data + oy * output->rowbytes);
             for (A_long ox = roiLeft; ox <= roiRight; ++ox) {
                 // Single sample with subpixel alpha correction
                 float sdfC = sampleSDF((float)ox, (float)oy);
                 float strokeCoverage = strokeSampleCoverage(sdfC);
-                if (strokeCoverage < 0.001f) continue;
+                if (strokeCoverage < BorderConstants::COVERAGE_EPSILON) continue;
 
                 // Dither coverage before 8bpc quantization to avoid visible plateaus.
                 float strokeA = strokeCoverage;
@@ -2141,7 +1993,7 @@ Render(
                     dst.red = color.red;
                     dst.green = color.green;
                     dst.blue = color.blue;
-                    dst.alpha = (A_u_char)(PF_MAX_CHAN8 * strokeA + 0.5f);
+                    dst.alpha = static_cast<A_u_char>(PF_MAX_CHAN8 * strokeA + 0.5f);
                 } else {
                     // Straight alpha compositing (Porter-Duff over)
                     float invStrokeA = 1.0f - strokeA;
@@ -2238,15 +2090,10 @@ EffectMain(
             err = Render(in_data, out_data, params, output);
             break;
 
-        // Fallback SmartFX handlers:
-        // We do not advertise Smart Render in out_flags2, but hosts may still call these
-        // if they have cached older PiPL flags. Implementing them avoids hard errors.
         case PF_Cmd_SMART_PRE_RENDER:
-            err = PreRender(in_data, out_data, reinterpret_cast<PF_PreRenderExtra*>(extra));
-            break;
-
         case PF_Cmd_SMART_RENDER:
-            err = SmartRender(in_data, out_data, reinterpret_cast<PF_SmartRenderExtra*>(extra));
+            // We do not advertise Smart Render in out_flags2
+            err = PF_Err_UNRECOGNIZED_PARAM_TYPE;
             break;
         }
     }

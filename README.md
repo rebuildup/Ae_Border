@@ -1,6 +1,13 @@
 # Border
 
+Version 1.0.0.2
+
 After Effects 用のエフェクトプラグイン「Border」のサンプルです。
+
+## 動作環境
+- After Effects 2020 (17.0) 以降
+- Windows 10/11 x64 または macOS 10.15+
+- C++17 準拠コンパイラ
 
 ## 配置
 AeSDK 付属の Examples ツリー内でビルドできるようにしてあります。
@@ -9,6 +16,16 @@ AeSDK 付属の Examples ツリー内でビルドできるようにしてあり�
 
 ## ビルド（Windows）
 - `Win/Border.sln` を Visual Studio で開いて `Release|x64` をビルド
+
+## ビルド（macOS）
+- `Mac/Border.xcodeproj` を Xcode で開いて `Release` をビルド
+
+## インストール方法
+ビルド生成された `.aex` ファイルを以下のフォルダにコピーしてください:
+- Windows: `C:\Program Files\Adobe\Adobe After Effects 2024\Support Files\Plug-ins\Effect`
+- macOS: `/Applications/Adobe After Effects 2024/Plug-ins/Effect`
+
+After Effects を再起動すると、「エフェクト」>「361do_plugins」>「Border」から利用できます。
 
 ## 動作確認（AA）
 - コンポのビット深度を `8bpc` / `16bpc` で切り替えて、同じ素材・同じ設定でエッジの階段状/段差が減っているか確認してください。

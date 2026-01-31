@@ -9,13 +9,14 @@
 
 #define PF_DEEP_COLOR_AWARE 1
 
-#include "AEConfig.h"
-
+// System headers
 #ifdef AE_OS_WIN
     typedef unsigned short PixelType;
     #include <Windows.h>
 #endif
 
+// SDK headers
+#include "AEConfig.h"
 #include "entry.h"
 #include "AE_Effect.h"
 #include "AE_EffectCB.h"
