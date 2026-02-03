@@ -498,11 +498,26 @@ jobs:
 
           # Verify Win directory was copied
           $winPath = Join-Path $pluginDir "Win"
+          Write-Host "Checking Win directory at: $winPath"
           if (Test-Path $winPath) {
             Write-Host "Win directory copied successfully"
-            Get-ChildItem $winPath | Select-Object -First 5 Name
+            Get-ChildItem $winPath | Select-Object -First 10 Name
           } else {
-            Write-Host "Warning: Win directory not found after copy"
+            Write-Host "ERROR: Win directory not found after copy"
+            Write-Host "Plugin directory contents:"
+            Get-ChildItem $pluginDir | Select-Object Name
+            exit 1
+          }
+
+          # Verify Border.sln exists
+          $slnPath = Join-Path $winPath "Border.sln"
+          if (Test-Path $slnPath) {
+            Write-Host "Border.sln found at: $slnPath"
+          } else {
+            Write-Host "ERROR: Border.sln not found at: $slnPath"
+            Write-Host "Win directory contents:"
+            Get-ChildItem $winPath | Select-Object Name
+            exit 1
           }
 
           Write-Host "Plugin copied to: $pluginDir"
