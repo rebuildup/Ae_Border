@@ -17,7 +17,6 @@
 
 // SDK headers
 #include "AEConfig.h"
-#include "FPTypes.h"
 #include "entry.h"
 #include "AE_Effect.h"
 #include "AE_EffectCB.h"
