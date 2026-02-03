@@ -1333,8 +1333,8 @@ SmartRender(
         // Calculate offset between input and output (output may be expanded)
         // We want output pixel (outX,outY) to map to input (x,y) at the same comp space.
         // If output is expanded (origin more negative), we need a positive offset to index into it.
-        A_long offsetX = input->origin_x - output->origin_x;
-        A_long offsetY = input->origin_y - output->origin_y;
+        A_long offsetX = input->origin_h - output->origin_h;
+        A_long offsetY = input->origin_v - output->origin_v;
 
         // Generate signed distance field (fast chamfer, scaled by 10)
         std::vector<float> signedDist;
@@ -1730,8 +1730,9 @@ Render(
     float thicknessF = static_cast<float>(thicknessInt);
     float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * BorderConstants::STROKE_HALF : thicknessF;
 
-    const A_long originX = in_data->origin_x;
-    const A_long originY = in_data->origin_y;
+    // Calculate relative origin of input from output (output may be expanded)
+    const A_long originX = input->origin_h - output->origin_h;
+    const A_long originY = input->origin_v - output->origin_v;
 
     const A_long outW = output->width;
     const A_long outH = output->height;
