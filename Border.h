@@ -36,14 +36,13 @@
 #include "Border_Strings.h"
 #include "Border_Version.h"
 
-// Type definitions - only define if not already defined by SDK
-#ifndef FPTypes_H
-typedef unsigned char		u_char;
-typedef unsigned short		u_short;
-typedef unsigned short		u_int16;
-typedef unsigned long		u_long;
-typedef short int			int16;
-#endif
+// Type definitions - SDK 25.6 already defines these types in FPTypes.h
+// To avoid redefinition errors, we use SDK's type definitions instead
+// typedef unsigned char   u_char;
+// typedef unsigned short  u_short;
+// typedef unsigned short  u_int16;
+// typedef unsigned long   u_long;
+// typedef short int       int16;
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
