@@ -1333,8 +1333,11 @@ SmartRender(
         // Calculate offset between input and output (output may be expanded)
         // We want output pixel (outX,outY) to map to input (x,y) at the same comp space.
         // If output is expanded (origin more negative), we need a positive offset to index into it.
-        A_long offsetX = input->origin_h - output->origin_h;
-        A_long offsetY = input->origin_v - output->origin_v;
+        // Cast PF_LayerDef to PF_EffectWorld to access origin_h/origin_v
+        PF_EffectWorld* inputWorld = reinterpret_cast<PF_EffectWorld*>(input);
+        PF_EffectWorld* outputWorld = reinterpret_cast<PF_EffectWorld*>(output);
+        A_long offsetX = inputWorld->origin_h - outputWorld->origin_h;
+        A_long offsetY = inputWorld->origin_v - outputWorld->origin_v;
 
         // Generate signed distance field (fast chamfer, scaled by 10)
         std::vector<float> signedDist;
@@ -1731,8 +1734,11 @@ Render(
     float strokeThicknessF = (direction == DIRECTION_BOTH) ? thicknessF * BorderConstants::STROKE_HALF : thicknessF;
 
     // Calculate relative origin of input from output (output may be expanded)
-    const A_long originX = input->origin_h - output->origin_h;
-    const A_long originY = input->origin_v - output->origin_v;
+    // Cast PF_LayerDef to PF_EffectWorld to access origin_h/origin_v
+    PF_EffectWorld* inputWorld = reinterpret_cast<PF_EffectWorld*>(input);
+    PF_EffectWorld* outputWorld = reinterpret_cast<PF_EffectWorld*>(output);
+    const A_long originX = inputWorld->origin_h - outputWorld->origin_h;
+    const A_long originY = inputWorld->origin_v - outputWorld->origin_v;
 
     const A_long outW = output->width;
     const A_long outH = output->height;
