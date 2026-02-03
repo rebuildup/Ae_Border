@@ -26,25 +26,24 @@
 #include "String_Utils.h"
 #include "AE_GeneralPlug.h"
 
-/* Define PF_TABLE_BITS before including AEFX_ChannelDepthTpl.h */
+/* Define PF_TABLE_BITS for SDK compatibility */
 #define PF_TABLE_BITS	12
 #define PF_TABLE_SZ_16	4096
 
-#include "AEFX_ChannelDepthTpl.h"
+/* Note: AEFX_ChannelDepthTpl.h is not included due to SDK 25.6 compatibility issues.
+ * The plugin doesn't require the AEFX macros for this implementation. */
 #include "AEGP_SuiteHandler.h"
 
 #include "Border_Strings.h"
 #include "Border_Version.h"
 
-// Type definitions - ensure required types are defined for AEFX_ChannelDepthTpl.h
-// SDK 25.6 may define these in different headers, but we need them available
-#ifndef FPTYPES_INCLUDED
-typedef unsigned char   u_char;
-typedef unsigned short  u_short;
-typedef unsigned short  u_int16;
-typedef unsigned long   u_long;
-typedef short int       int16;
-#endif
+// Type definitions - SDK 25.6 already defines these types in FPTypes.h
+// To avoid redefinition errors, we use SDK's type definitions instead
+// typedef unsigned char   u_char;
+// typedef unsigned short  u_short;
+// typedef unsigned short  u_int16;
+// typedef unsigned long   u_long;
+// typedef short int       int16;
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
