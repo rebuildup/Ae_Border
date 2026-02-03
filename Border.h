@@ -36,13 +36,15 @@
 #include "Border_Strings.h"
 #include "Border_Version.h"
 
-// Type definitions - SDK 25.6 already defines these types in FPTypes.h
-// To avoid redefinition errors, we use SDK's type definitions instead
-// typedef unsigned char   u_char;
-// typedef unsigned short  u_short;
-// typedef unsigned short  u_int16;
-// typedef unsigned long   u_long;
-// typedef short int       int16;
+// Type definitions - ensure required types are defined for AEFX_ChannelDepthTpl.h
+// SDK 25.6 may define these in different headers, but we need them available
+#ifndef FPTYPES_INCLUDED
+typedef unsigned char   u_char;
+typedef unsigned short  u_short;
+typedef unsigned short  u_int16;
+typedef unsigned long   u_long;
+typedef short int       int16;
+#endif
 
 #define BORDER_THICKNESS_MIN     0.0
 #define BORDER_THICKNESS_MAX     2000.0
