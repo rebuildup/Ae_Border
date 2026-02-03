@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <limits>
 #include <cstring>
 #include <thread>
