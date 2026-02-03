@@ -449,10 +449,10 @@ jobs:
         if: matrix.platform == 'mac'
         run: |
           echo "Copying plugin to SDK Template directory..."
-          
+
           PLUGIN_DIR="$SDK_ROOT/Template/Border"
           mkdir -p "$PLUGIN_DIR"
-          
+
           rsync -av \
             --exclude='.git' \
             --exclude='tmp' \
@@ -460,9 +460,18 @@ jobs:
             --exclude='.github' \
             --exclude='output' \
             --exclude='AE_SDK.zip' \
+            --exclude='failed_log.txt' \
             "${{ github.workspace }}/" \
             "$PLUGIN_DIR/"
-          
+
+          # Verify Mac directory was copied
+          if [ -d "$PLUGIN_DIR/Mac" ]; then
+            echo "Mac directory copied successfully"
+            ls -la "$PLUGIN_DIR/Mac" | head -5
+          else
+            echo "Warning: Mac directory not found after copy"
+          fi
+
           echo "Plugin copied to: $PLUGIN_DIR"
           echo "PLUGIN_DIR=$PLUGIN_DIR" >> $GITHUB_ENV
 
@@ -471,18 +480,31 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Copying plugin to SDK Template directory..."
-          
+
           $pluginDir = "$env:SDK_ROOT\Template\Border"
           New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
-          
-          $excludeDirs = @('.git', 'tmp', 'ae_sdk_work', '.github', 'output')
-          
+
+          # Copy all files and directories from workspace to plugin directory
+          # This includes the Win/ and Mac/ subdirectories with project files
+          $excludeDirs = @('.git', 'tmp', 'ae_sdk_work', '.github', 'output', 'failed_log.txt')
+
           Get-ChildItem "${{ github.workspace }}" -Force | Where-Object {
             $_.Name -notin $excludeDirs -and $_.Name -ne 'AE_SDK.zip'
           } | ForEach-Object {
-            Copy-Item -Path $_.FullName -Destination $pluginDir -Recurse -Force
+            $destPath = Join-Path $pluginDir $_.Name
+            Write-Host "Copying: $($_.Name) to $destPath"
+            Copy-Item -Path $_.FullName -Destination $destPath -Recurse -Force
           }
-          
+
+          # Verify Win directory was copied
+          $winPath = Join-Path $pluginDir "Win"
+          if (Test-Path $winPath) {
+            Write-Host "Win directory copied successfully"
+            Get-ChildItem $winPath | Select-Object -First 5 Name
+          } else {
+            Write-Host "Warning: Win directory not found after copy"
+          }
+
           Write-Host "Plugin copied to: $pluginDir"
           Add-Content -Path $env:GITHUB_ENV -Value "PLUGIN_DIR=$pluginDir"
 
