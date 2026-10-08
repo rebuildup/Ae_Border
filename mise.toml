@@ -37,3 +37,7 @@ run = "bash scripts/ae-macos.sh reveal"
 
 [tasks.clean]
 run = "bash scripts/ae-macos.sh clean"
+
+[tasks.check]
+description = "Build and verify locally without installing in After Effects"
+run = ["bash scripts/ae-macos.sh build Debug", "bash scripts/ae-macos.sh verify Debug"]
