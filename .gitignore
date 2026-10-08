@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# XcodeGen generated files and local SDK path
+/Border.xcodeproj/
+/build/
+/.env.local
