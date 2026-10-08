@@ -101,6 +101,51 @@ verify() {
   fi
   nm -gU "$binary" | grep -Eq "_${entry}$" ||
     die "Expected exported symbol $entry not found"
+  if [[ "$kind" == effect ]]; then
+    nm -gU "$binary" | grep -Eq '_PluginDataEntryFunction2  grep -aq 'ma64' "$rsrc" || die "PiPL is missing CodeMacARM64"
+  codesign --verify --strict "$bundle" || die "Bundle signature invalid"
+  if otool -L "$binary" | sed '1d' | grep -q '^[[:space:]]*/Users/'; then
+    die "Absolute /Users link dependency in bundle"
+  fi
+  echo "Verified bundle (not AE-host-tested): $bundle"
+}
+
+install_plugin() {
+  verify
+  mkdir -p "$ae_dir"
+  if [[ -e "$installed" ]]; then
+    mv "$installed" "$installed.backup-$(date +%Y%m%d%H%M%S)"
+  fi
+  ditto "$bundle" "$installed"
+  codesign --force --sign - --timestamp=none "$installed"
+  codesign --verify --strict "$installed"
+  echo "Installed: $installed (restart After Effects)"
+}
+
+case "$action" in
+  sdk-path) resolve_sdk ;;
+  generate) generate ;;
+  build) build ;;
+  verify) verify ;;
+  install) install_plugin ;;
+  uninstall)
+    if [[ -e "$installed" ]]; then
+      mv "$installed" "$installed.backup-$(date +%Y%m%d%H%M%S)"
+      echo "Uninstalled $name (backup retained)"
+    else
+      echo "Not installed: $name"
+    fi
+    ;;
+  reveal) mkdir -p "$ae_dir"; open "$ae_dir" ;;
+  clean)
+    rm -rf "$root/build" "$root/$name.xcodeproj"
+    echo "Removed generated build artifacts"
+    ;;
+  *) die "Usage: $0 {sdk-path|generate|build|verify|install|uninstall|reveal|clean} [Debug|Release]" ;;
+esac
+ ||
+      die "Missing PluginDataEntryFunction2 (required by the effect plug-in template)"
+  fi
   grep -aq 'ma64' "$rsrc" || die "PiPL is missing CodeMacARM64"
   codesign --verify --strict "$bundle" || die "Bundle signature invalid"
   if otool -L "$binary" | sed '1d' | grep -q '^[[:space:]]*/Users/'; then
