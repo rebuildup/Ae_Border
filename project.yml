@@ -1,0 +1,79 @@
+# Native macOS project. XcodeGen output is not source of truth.
+# Keep Windows/ and the legacy Mac/ project unchanged during migration.
+name: Border
+
+options:
+  bundleIdPrefix: com.adobe.AfterEffects
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SDKROOT: macosx
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    CLANG_CXX_LIBRARY: libc++
+    GCC_SYMBOLS_PRIVATE_EXTERN: YES
+    REZ_PREPROCESSOR_DEFINITIONS:
+      - __MACH__
+      - "$(inherited)"
+
+targets:
+  Border:
+    type: bundle
+    platform: macOS
+    productName: Border
+    product: Border.plugin
+    sources:
+      - path: Border.cpp
+      - path: Border_Strings.cpp
+      - path: BorderPiPL.r
+      - path: Mac/Border.plugin-Info.plist
+        buildPhase: none
+      - path: "${AE_SDK_ROOT}/Examples/Util/AEGP_SuiteHandler.cpp"
+        optional: false
+      - path: "${AE_SDK_ROOT}/Examples/Util/MissingSuiteError.cpp"
+        optional: false
+    dependencies:
+      - sdk: Cocoa.framework
+    settings:
+      base:
+        INFOPLIST_FILE: Mac/Border.plugin-Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.adobe.AfterEffects.Border
+        WRAPPER_EXTENSION: plugin
+        GENERATE_INFOPLIST_FILE: NO
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)"
+          - "$(AE_SDK_ROOT)/Examples/Headers"
+          - "$(AE_SDK_ROOT)/Examples/Util"
+          - "$(AE_SDK_ROOT)/Examples/Headers/SP"
+          - "$(AE_SDK_ROOT)/Examples/Resources"
+        REZ_SEARCH_PATHS:
+          - "$(SRCROOT)"
+          - "$(AE_SDK_ROOT)/Examples/Headers"
+          - "$(AE_SDK_ROOT)/Examples/Util"
+          - "$(AE_SDK_ROOT)/Examples/Resources"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_REQUIRED: YES
+        CODE_SIGNING_ALLOWED: YES
+        OTHER_CODE_SIGN_FLAGS: "--timestamp=none"
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+          GCC_OPTIMIZATION_LEVEL: 0
+        Release:
+          ONLY_ACTIVE_ARCH: NO
+          ARCHS: "arm64 x86_64"
+          GCC_OPTIMIZATION_LEVEL: s
+
+schemes:
+  Border:
+    build:
+      targets:
+        Border: all
+    run:
+      config: Debug
+    archive:
+      config: Release
