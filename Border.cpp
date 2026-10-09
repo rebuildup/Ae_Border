@@ -12,7 +12,9 @@
 #include <atomic>
 
 #ifdef _WIN32
+#if defined(_OPENMP)
 #include <omp.h>
+#endif
 #undef min
 #undef max
 #endif

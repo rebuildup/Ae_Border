@@ -1,0 +1,48 @@
+[tools]
+xcodegen = "2.46.0"
+
+[env]
+AE_PLUGIN_NAME = "Border"
+AE_PLUGIN_KIND = "effect"
+
+[tasks.sdk-path]
+description = "Print the resolved Adobe After Effects SDK path"
+run = "bash scripts/ae-macos.sh sdk-path"
+
+[tasks.info]
+description = "Print the plug-in identity declared in the PiPL (name, match name, entry point)"
+run = "bash scripts/ae-macos.sh info"
+
+[tasks.generate]
+run = "bash scripts/ae-macos.sh generate"
+
+[tasks.build]
+run = "bash scripts/ae-macos.sh build Debug"
+
+[tasks.build-release]
+run = "bash scripts/ae-macos.sh build Release"
+
+[tasks.verify]
+run = "bash scripts/ae-macos.sh verify Debug"
+
+[tasks.verify-release]
+run = "bash scripts/ae-macos.sh verify Release"
+
+[tasks.install]
+run = "bash scripts/ae-macos.sh install Debug"
+
+[tasks.install-release]
+run = "bash scripts/ae-macos.sh install Release"
+
+[tasks.uninstall]
+run = "bash scripts/ae-macos.sh uninstall"
+
+[tasks.ae-reveal]
+run = "bash scripts/ae-macos.sh reveal"
+
+[tasks.clean]
+run = "bash scripts/ae-macos.sh clean"
+
+[tasks.check]
+description = "Build and verify locally without installing in After Effects"
+run = ["bash scripts/ae-macos.sh build Debug", "bash scripts/ae-macos.sh verify Debug"]
