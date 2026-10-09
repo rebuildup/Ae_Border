@@ -45,9 +45,28 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)"
+        # The Adobe SDK is third-party code. Passing its include directories via
+        # -isystem instead of -I keeps the SDK's own warnings out of this build
+        # log, so a warning here means our code, not the SDK's.
+        OTHER_CFLAGS:
+          - "$(inherited)"
+          - "-isystem"
           - "$(AE_SDK_ROOT)/Examples/Headers"
+          - "-isystem"
           - "$(AE_SDK_ROOT)/Examples/Util"
+          - "-isystem"
           - "$(AE_SDK_ROOT)/Examples/Headers/SP"
+          - "-isystem"
+          - "$(AE_SDK_ROOT)/Examples/Resources"
+        OTHER_CPLUSPLUSFLAGS:
+          - "$(inherited)"
+          - "-isystem"
+          - "$(AE_SDK_ROOT)/Examples/Headers"
+          - "-isystem"
+          - "$(AE_SDK_ROOT)/Examples/Util"
+          - "-isystem"
+          - "$(AE_SDK_ROOT)/Examples/Headers/SP"
+          - "-isystem"
           - "$(AE_SDK_ROOT)/Examples/Resources"
         REZ_SEARCH_PATHS:
           - "$(SRCROOT)"

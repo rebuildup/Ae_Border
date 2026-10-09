@@ -6,7 +6,12 @@ AE_PLUGIN_NAME = "Border"
 AE_PLUGIN_KIND = "effect"
 
 [tasks.sdk-path]
+description = "Print the resolved Adobe After Effects SDK path"
 run = "bash scripts/ae-macos.sh sdk-path"
+
+[tasks.info]
+description = "Print the plug-in identity declared in the PiPL (name, match name, entry point)"
+run = "bash scripts/ae-macos.sh info"
 
 [tasks.generate]
 run = "bash scripts/ae-macos.sh generate"

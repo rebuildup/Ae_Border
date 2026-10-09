@@ -46,7 +46,7 @@ resource 'PiPL' (16000) {
         /* [8] */
         // PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 2) = 0x01000002
         // Rez compiler cannot expand C macros, use literal value
-        AE_Effect_Version { 0x01000002 },
+        AE_Effect_Version { 0x00080002 } /* PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 2) */,
         /* [9] */
         AE_Effect_Info_Flags {
             0
